@@ -1,0 +1,50 @@
+# Each profile binds one demonstration dataset to its matching Isaac Lab task.
+# Add one entry per robot/task pair. Tags must be unique and start with
+# "isaaclab_" so N1.7 can assign each embodiment a separate model ID.
+profiles:
+  - name: pick_place_gr1t2
+    embodiment_tag: isaaclab_custom_pick_place
+    environment_id: IsaacContrib-PickPlace-GR1T2-GR00T-Abs-Mimic-v0
+    hdf5_inputs:
+      - ./datasets/generated_dataset_gr1t2.hdf5
+    lerobot_dataset: ./datasets/isaaclab_pick_place_gr1t2
+    checkpoint: ./outputs/isaaclab_multi_robot
+    task_description: Pick up the object and place it into the target container.
+    fps: 20
+    action_horizon: 16
+    action_source: processed_actions
+    require_success: true
+    mix_ratio: 1.0
+    action_fields:
+      arm_left: [0, 7]
+      arm_right: [7, 14]
+      hand_left: [14, 25]
+      hand_right: [25, 36]
+    state_fields:
+      left_eef: [left_eef_pos, left_eef_quat]
+      right_eef: [right_eef_pos, right_eef_quat]
+      hand_joint_state: [hand_joint_state]
+      head_joint_state: [head_joint_state]
+      object: [object]
+    camera_fields:
+      robot_pov_cam: robot_pov_cam
+      left_wrist_cam: left_wrist_cam
+      right_wrist_cam: right_wrist_cam
+
+  # Copy this entry for another robot/task and replace its paths and mappings.
+  # - name: another_robot_task
+  #   embodiment_tag: isaaclab_another_robot_task
+  #   environment_id: Isaac-Contrib-AnotherTask-v0
+  #   hdf5_inputs: [./datasets/another_task.hdf5]
+  #   lerobot_dataset: ./datasets/another_task_lerobot
+  #   checkpoint: ./outputs/isaaclab_multi_robot
+  #   task_description: Describe the demonstrated task.
+  #   fps: 20
+  #   action_horizon: 16
+  #   action_source: actions
+  #   require_success: true
+  #   mix_ratio: 1.0
+  #   action_fields: {arm: [0, 7], hand: [7, 12]}
+  #   state_fields: {robot_state: [joint_pos]}
+  #   camera_fields: {front: front_camera}
+

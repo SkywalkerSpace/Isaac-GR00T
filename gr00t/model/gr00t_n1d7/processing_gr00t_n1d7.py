@@ -69,6 +69,7 @@ EMBODIMENT_TAG_TO_PROJECTOR_INDEX = {
     "simpler_env_widowx": 1,
     "libero_sim": 2,
     "new_embodiment": 10,
+    "isaaclab_custom": 10,
 }
 
 
@@ -214,7 +215,9 @@ class Gr00tN1d7Processor(BaseProcessor):
         self.processor = build_processor(model_name, transformers_loading_kwargs)
         # Set padding side to 'left' for Flash Attention compatibility
         self.processor.tokenizer.padding_side = "left"
-        self.embodiment_id_mapping = embodiment_id_mapping or EMBODIMENT_TAG_TO_PROJECTOR_INDEX
+        self.embodiment_id_mapping = dict(
+            EMBODIMENT_TAG_TO_PROJECTOR_INDEX if embodiment_id_mapping is None else embodiment_id_mapping
+        )
         # Merge any missing pre-trained embodiment tags into the custom mapping
         for k, v in EMBODIMENT_TAG_TO_PROJECTOR_INDEX.items():
             if k not in self.embodiment_id_mapping:

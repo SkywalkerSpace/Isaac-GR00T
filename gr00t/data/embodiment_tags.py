@@ -47,6 +47,7 @@ class EmbodimentTag(Enum):
 
     Finetuning tag (for custom robots):
     - NEW_EMBODIMENT       -> "new_embodiment"
+    - ISAACLAB_CUSTOM      -> "isaaclab_custom"
 
     Use ``EmbodimentTag.resolve(s)`` to look up a tag by name or value,
     case-insensitively.
@@ -122,6 +123,9 @@ class EmbodimentTag(Enum):
     Any new embodiment.
     """
 
+    ISAACLAB_CUSTOM = "isaaclab_custom"
+    """Custom robot/task data collected or generated in Isaac Lab."""
+
     @classmethod
     def resolve(cls, tag: "str | EmbodimentTag") -> "EmbodimentTag":
         """Resolve a string to an EmbodimentTag, case-insensitively.
@@ -144,6 +148,8 @@ class EmbodimentTag(Enum):
         for member in cls:
             if member.value.lower() == key_lower:
                 return member
+        if key_lower.startswith("isaaclab_"):
+            return cls(key_lower)
 
         def _fmt(tags):
             return "\n".join(f"    {m.name:40s} -> {m.value}" for m in tags)
@@ -158,6 +164,16 @@ class EmbodimentTag(Enum):
             f"{_fmt(FINETUNE_ONLY_TAGS)}"
         )
         raise ValueError(msg)
+
+    @classmethod
+    def _missing_(cls, value):
+        """Allow profile-specific Isaac Lab tags without editing this enum per robot."""
+        if isinstance(value, str) and value.startswith("isaaclab_"):
+            member = object.__new__(cls)
+            member._name_ = value.upper()
+            member._value_ = value
+            return member
+        return None
 
     @classmethod
     def reverse_lookup(cls, value: str) -> "str":
@@ -196,6 +212,7 @@ POSTTRAIN_TAGS: frozenset[EmbodimentTag] = frozenset(
 FINETUNE_ONLY_TAGS: frozenset[EmbodimentTag] = frozenset(
     {
         EmbodimentTag.NEW_EMBODIMENT,
+        EmbodimentTag.ISAACLAB_CUSTOM,
     }
 )
 """Tags for custom robots (finetuning only, not in any shipped checkpoint)."""

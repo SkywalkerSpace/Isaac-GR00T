@@ -27,7 +27,10 @@ from gr00t.data.dataset.factory import DatasetFactory
 from gr00t.experiment.dist_utils import get_rank
 from gr00t.model.base.model_pipeline import ModelPipeline
 from gr00t.model.gr00t_n1d7.gr00t_n1d7 import Gr00tN1d7
-from gr00t.model.gr00t_n1d7.processing_gr00t_n1d7 import Gr00tN1d7Processor
+from gr00t.model.gr00t_n1d7.processing_gr00t_n1d7 import (
+    EMBODIMENT_TAG_TO_PROJECTOR_INDEX,
+    Gr00tN1d7Processor,
+)
 from gr00t.model.registry import register_model
 
 
@@ -146,7 +149,23 @@ class Gr00tN1d7Pipeline(ModelPipeline):
         return None
 
     def _get_embodiment_id_mapping(self) -> dict[str, int]:
-        return None
+        mapping = dict(EMBODIMENT_TAG_TO_PROJECTOR_INDEX)
+        custom_tags = sorted({
+            dataset.embodiment_tag
+            for dataset in self.config.data.datasets
+            if dataset.embodiment_tag and dataset.embodiment_tag.startswith("isaaclab_")
+        })
+        available_ids = iter(sorted(set(range(self.model_config.max_num_embodiments)) - set(mapping.values())))
+        for tag in custom_tags:
+            if tag not in mapping:
+                try:
+                    mapping[tag] = next(available_ids)
+                except StopIteration as exc:
+                    raise ValueError(
+                        f"More Isaac Lab embodiment profiles ({len(custom_tags)}) than available "
+                        f"projector IDs (max_num_embodiments={self.model_config.max_num_embodiments})"
+                    ) from exc
+        return mapping
 
     def _create_dataset(self, save_cfg_dir: Path):
         """Create appropriate dataset based on task and mode."""
@@ -155,6 +174,7 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 self.config.training.start_from_checkpoint,
                 # Overrides
                 modality_configs=self.config.data.modality_configs,
+                embodiment_id_mapping=self._get_embodiment_id_mapping(),
                 use_percentiles=self.model_config.use_percentiles,
                 image_crop_size=self.model_config.image_crop_size,
                 image_target_size=self.model_config.image_target_size,

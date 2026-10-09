@@ -1,0 +1,52 @@
+model:
+  model_type: Gr00tN1d7
+  model_dtype: bfloat16
+  model_name: nvidia/Cosmos-Reason2-2B
+  backbone_model_type: qwen
+  tune_llm: false
+  tune_visual: false
+  tune_projector: true
+  tune_diffusion_model: true
+  tune_vlln: true
+  use_relative_action: false
+  use_percentiles: true
+  max_state_dim: 132
+  max_action_dim: 132
+  action_horizon: 40
+  state_history_length: 1
+  state_dropout_prob: 0.0
+  image_crop_size: [230, 230]
+  image_target_size: [256, 256]
+
+data:
+  download_cache: false
+  datasets: []
+  modality_configs: {}
+  shard_size: 1024
+  episode_sampling_rate: 0.1
+  num_shards_per_epoch: 100000
+  mode: single_turn
+  shuffle: true
+  seed: 42
+  video_backend: torchcodec
+
+training:
+  output_dir: ./outputs/isaaclab_multi_robot
+  experiment_name: isaaclab_multi_robot_n1d7
+  start_from_checkpoint: nvidia/GR00T-N1.7-3B
+  global_batch_size: 16
+  gradient_accumulation_steps: 1
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  warmup_ratio: 0.05
+  max_steps: 10000
+  save_steps: 500
+  save_total_limit: 5
+  num_gpus: 1
+  dataloader_num_workers: 4
+  bf16: true
+  tf32: true
+  use_wandb: false
+  eval_strategy: "no"
+  deepspeed_stage: 2
+  save_only_model: false
