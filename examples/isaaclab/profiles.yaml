@@ -21,11 +21,9 @@ profiles:
       hand_left: [14, 25]
       hand_right: [25, 36]
     state_fields:
-      left_eef: [left_eef_pos, left_eef_quat]
-      right_eef: [right_eef_pos, right_eef_quat]
+      arm_left: [left_eef_pos, left_eef_quat]
+      arm_right: [right_eef_pos, right_eef_quat]
       hand_joint_state: [hand_joint_state]
-      head_joint_state: [head_joint_state]
-      object: [object]
     camera_fields:
       robot_pov_cam: robot_pov_cam
       left_wrist_cam: left_wrist_cam
