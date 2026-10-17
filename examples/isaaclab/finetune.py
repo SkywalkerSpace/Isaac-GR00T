@@ -2,6 +2,7 @@
 """Launch N1.7 fine-tuning with the local Isaac Lab modality configuration."""
 
 import argparse
+import os
 from pathlib import Path
 
 import yaml
@@ -64,6 +65,20 @@ def main() -> None:
     for profile in profiles:
         MODALITY_CONFIGS[profile["embodiment_tag"]] = build_modality_config(profile)
     config.validate()
+
+    # Accelerate probes/imports DeepSpeed while unwrapping models, even when
+    # Trainer was not given a DeepSpeed configuration. On minimal servers that
+    # can trigger Triton compilation (and require Python development headers).
+    # This single-process training entry point does not use DeepSpeed.
+    if config.training.num_gpus == 1 or config.training.use_ddp:
+        os.environ["GR00T_DISABLE_ACCELERATE_DEEPSPEED"] = "1"
+        try:
+            from accelerate.utils import other as accelerate_other
+
+            accelerate_other.is_deepspeed_available = lambda: False
+        except ImportError:
+            pass
+
     run(config)
 
 
