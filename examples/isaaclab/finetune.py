@@ -20,6 +20,19 @@ def main() -> None:
 
     config_path = args.config.expanduser().resolve()
     config_data = yaml.safe_load(config_path.read_text())
+    # Flash Attention 2 requires the Qwen3-VL backbone to be loaded in a
+    # half precision dtype. TrainingArguments.bf16 only enables autocast; it
+    # does not change the dtype used by from_pretrained().
+    model_config = config_data.setdefault("model", {})
+    if model_config.get("use_flash_attention", True):
+        model_dtype = model_config.get("model_dtype", "bfloat16")
+        if model_dtype not in ("bfloat16", "float16"):
+            raise ValueError(
+                "Flash Attention 2 requires model.model_dtype to be 'bfloat16' "
+                f"or 'float16'; got {model_dtype!r}"
+            )
+        model_config["load_bf16"] = model_dtype == "bfloat16"
+
     output_dir = Path(config_data["training"]["output_dir"]).expanduser()
     if not output_dir.is_absolute():
         config_data["training"]["output_dir"] = str((config_path.parent / output_dir).resolve())
