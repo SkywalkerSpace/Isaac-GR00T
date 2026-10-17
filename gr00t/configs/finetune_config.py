@@ -32,6 +32,9 @@ class FinetuneConfig:
     base_model_path: str
     """Path to the pretrained base model checkpoint (e.g., Hugging Face model hub or local directory)."""
 
+    model_name: str = "nvidia/Cosmos-Reason2-2B"
+    """Qwen3-VL backbone model ID or local model directory."""
+
     dataset_path: str
     """Path to the dataset root directory containing trajectory data for fine-tuning."""
 

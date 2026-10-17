@@ -1,7 +1,7 @@
 model:
   model_type: Gr00tN1d7
   model_dtype: bfloat16
-  model_name: nvidia/Cosmos-Reason2-2B
+  model_name: /home/mayuhang/models/Cosmos-Reason2-2B
   backbone_model_type: qwen
   tune_llm: false
   tune_visual: false
@@ -33,7 +33,7 @@ data:
 training:
   output_dir: ./outputs/isaaclab_multi_robot
   experiment_name: isaaclab_multi_robot_n1d7
-  start_from_checkpoint: nvidia/GR00T-N1.7-3B
+  start_from_checkpoint: /home/mayuhang/models/GR00T-N1.7-3B
   global_batch_size: 16
   gradient_accumulation_steps: 1
   learning_rate: 0.0001

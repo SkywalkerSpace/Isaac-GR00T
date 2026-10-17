@@ -13,6 +13,7 @@ def main() -> None:
     args = parser.parse_args()
 
     from gr00t.configs.base_config import get_default_config
+    from gr00t.configs.data.data_config import SingleDatasetConfig
     from gr00t.experiment.experiment import run
     from profile_utils import load_profiles
     from modality_config import build_modality_config
@@ -35,12 +36,14 @@ def main() -> None:
                 f"Profile {profile['name']} dataset is missing {info_path}; "
                 "convert its HDF5 input first"
             )
-        config.data.datasets.append({
-            "dataset_paths": [str(dataset_path)],
-            "embodiment_tag": profile["embodiment_tag"],
-            "mix_ratio": float(profile["mix_ratio"]),
-            "dataset_type": "physical_embodiment",
-        })
+        config.data.datasets.append(
+            SingleDatasetConfig(
+                dataset_paths=[str(dataset_path)],
+                embodiment_tag=profile["embodiment_tag"],
+                mix_ratio=float(profile["mix_ratio"]),
+                dataset_type="physical_embodiment",
+            )
+        )
         config.data.modality_configs[profile["embodiment_tag"]] = build_modality_config(profile)
 
     from gr00t.configs.data.embodiment_configs import MODALITY_CONFIGS
