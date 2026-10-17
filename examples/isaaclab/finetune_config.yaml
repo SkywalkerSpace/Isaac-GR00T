@@ -46,7 +46,9 @@ training:
   dataloader_num_workers: 4
   bf16: true
   tf32: true
-  use_wandb: false
+  use_wandb: true
+  wandb_project: isaaclab-gr00t
+  logging_steps: 10
   eval_strategy: "no"
   deepspeed_stage: 2
   save_only_model: false

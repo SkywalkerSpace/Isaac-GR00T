@@ -10,6 +10,6 @@ CONFIG_PATH="$(cd -- "$(dirname -- "$CONFIG_PATH")" && pwd)/$(basename -- "$CONF
 PROFILES_PATH="$(cd -- "$(dirname -- "$PROFILES_PATH")" && pwd)/$(basename -- "$PROFILES_PATH")"
 
 cd "$GR00T_ROOT"
-python "$SCRIPT_DIR/finetune.py" \
+CUDA_VISIBLE_DEVICES=3  python "$SCRIPT_DIR/finetune.py" \
   --config "$CONFIG_PATH" \
   --profiles "$PROFILES_PATH"
