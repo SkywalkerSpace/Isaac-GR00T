@@ -600,7 +600,19 @@ class Gr00tN1d7Processor(BaseProcessor):
         transformed_inputs.update(vlm_inputs)
         if action_mask is not None:
             transformed_inputs["action_mask"] = action_mask
-        transformed_inputs["embodiment_id"] = self.embodiment_id_mapping[embodiment_tag.value]
+        # Custom tags are often supplied by a user's dataset/profile and are
+        # therefore absent from the pretrained processor's saved mapping. The
+        # N1.7 checkpoint reserves the new-embodiment projector index for these
+        # tags. Pipelines may provide a more specific ID, which takes priority.
+        embodiment_id = self.embodiment_id_mapping.get(embodiment_tag.value)
+        if embodiment_id is None:
+            embodiment_id = self.embodiment_id_mapping.get("new_embodiment")
+        if embodiment_id is None:
+            raise KeyError(
+                f"No projector ID configured for embodiment '{embodiment_tag.value}', "
+                "and no 'new_embodiment' fallback is available."
+            )
+        transformed_inputs["embodiment_id"] = embodiment_id
         return transformed_inputs
 
     def _get_vlm_inputs(

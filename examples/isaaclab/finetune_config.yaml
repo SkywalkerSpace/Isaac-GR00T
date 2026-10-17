@@ -52,4 +52,4 @@ training:
   eval_strategy: "no"
   deepspeed_stage: 2
   save_only_model: false
-  use_ddp: true  # or DeepSpeed
+  # use_ddp: true  # or DeepSpeed
