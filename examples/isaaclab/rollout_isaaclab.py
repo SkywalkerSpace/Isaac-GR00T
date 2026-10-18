@@ -4,6 +4,7 @@
 import argparse
 import csv
 import sys
+import traceback
 from pathlib import Path
 
 from isaaclab.app import AppLauncher
@@ -199,6 +200,7 @@ if __name__ == "__main__":
         main()
     except Exception as exc:
         log(f"FAILED: {type(exc).__name__}: {exc}")
+        traceback.print_exc()
         raise
     finally:
         log("Closing simulation application")

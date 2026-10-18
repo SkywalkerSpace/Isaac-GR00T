@@ -25,8 +25,6 @@ from typing import Any
 
 import numpy as np
 import torch
-from torch.overrides import _get_current_function_mode_stack
-from torch.utils._device import DeviceContext
 from transformers import AutoModel, AutoProcessor
 
 from gr00t.data.embodiment_tags import FINETUNE_ONLY_TAGS, POSTTRAIN_TAGS, EmbodimentTag
@@ -102,12 +100,14 @@ class Gr00tPolicy(BasePolicy):
         # rejects that context for from_pretrained, which must materialize real
         # checkpoint weights. Temporarily shadow it with CPU during loading;
         # model.to() below moves the loaded model to the requested device.
+        from transformers.modeling_utils import get_torch_context_manager_or_global_device
+
         previous_device = torch.get_default_device()
-        has_device_context = any(
-            isinstance(mode, DeviceContext) for mode in _get_current_function_mode_stack()
-        )
-        if previous_device.type == "meta" and has_device_context:
+        context_device = get_torch_context_manager_or_global_device()
+        if context_device is not None and context_device.type == "meta":
             with torch.device("cpu"):
+                if get_torch_context_manager_or_global_device() is not None:
+                    raise RuntimeError("Could not clear the active meta device context for model loading")
                 model = AutoModel.from_pretrained(model_dir)
         elif previous_device.type == "meta":
             try:
