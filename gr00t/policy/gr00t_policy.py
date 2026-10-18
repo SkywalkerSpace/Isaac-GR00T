@@ -96,8 +96,17 @@ class Gr00tPolicy(BasePolicy):
             embodiment_tag = EmbodimentTag.resolve(embodiment_tag)
         model_dir = Path(model_path)
 
-        # Load the pretrained model and move to target device with bfloat16 precision
-        model = AutoModel.from_pretrained(model_dir)
+        # Isaac Lab and some launchers leave PyTorch's default device set to
+        # ``meta`` while constructing simulation/model state. Transformers
+        # rejects ``from_pretrained`` in that context because checkpoint
+        # weights must be materialized on a real device. Scope the default
+        # device to the requested inference device and restore it immediately.
+        previous_device = torch.get_default_device()
+        try:
+            torch.set_default_device(device)
+            model = AutoModel.from_pretrained(model_dir)
+        finally:
+            torch.set_default_device(previous_device)
         model.eval()  # Set model to evaluation mode
         model.to(device=device, dtype=torch.bfloat16)
         self.model = model
