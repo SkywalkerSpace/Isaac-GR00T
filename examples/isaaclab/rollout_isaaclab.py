@@ -215,6 +215,30 @@ def evaluate_profile(profile: dict) -> None:
                 if args.debug_camera:
                     _log_camera_stats(f"episode {episode} after reset ({camera_env_key})", reset_image)
                     if episode == 0:
+                        log(
+                            "Render diagnostics: "
+                            f"render_enabled={getattr(policy_env, 'render_enabled', 'n/a')}, "
+                            f"sim.is_rendering={getattr(policy_env.sim, 'is_rendering', 'n/a')}, "
+                            f"render_interval={getattr(policy_env.cfg.sim, 'render_interval', 'n/a')}"
+                        )
+                        for key, env_key in profile["camera_fields"].items():
+                            try:
+                                _log_camera_stats(
+                                    f"episode 0 reset ({env_key})",
+                                    _camera_frame(obs, env_key),
+                                )
+                            except (KeyError, ValueError) as exc:
+                                log(f"Camera diagnostic failed for {key} -> {env_key}: {exc}")
+                            sensor = getattr(policy_env.scene, "sensors", {}).get(env_key)
+                            if sensor is None:
+                                log(f"Camera sensor {env_key!r} not found in env.scene.sensors")
+                            else:
+                                log(
+                                    f"Camera sensor {env_key!r}: class={type(sensor).__name__}, "
+                                    f"prim_path={getattr(sensor.cfg, 'prim_path', 'n/a')}, "
+                                    f"renderer_cfg={getattr(sensor.cfg, 'renderer_cfg', 'n/a')}"
+                                )
+                    if episode == 0:
                         _save_camera_snapshot(reset_image, output_dir / "debug_reset.png")
                 frames = []
                 success = False
