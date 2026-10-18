@@ -3,6 +3,7 @@
 
 import argparse
 import csv
+import sys
 from pathlib import Path
 
 from isaaclab.app import AppLauncher
@@ -20,8 +21,13 @@ parser.add_argument("--video-dir", type=Path, default=Path("./outputs/isaaclab_r
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
+
+def log(message: str) -> None:
+    print(f"[ISAACLAB ROLLOUT] {message}", flush=True)
+
 app_launcher = AppLauncher(args, enable_cameras=True)
 simulation_app = app_launcher.app
+log("Simulation application initialized; loading rollout dependencies")
 
 import cv2
 import gymnasium as gym
@@ -106,16 +112,20 @@ def _save_video(frames: list[np.ndarray], path: Path, fps: int) -> None:
         writer.release()
     if not path.is_file() or path.stat().st_size == 0:
         raise RuntimeError(f"Video writer finished without creating a non-empty file: {path}")
+    log(f"Saved {len(frames)} frames to {path} ({path.stat().st_size} bytes)")
 
 
 def evaluate_profile(profile: dict) -> None:
     output_dir = args.video_dir / profile["name"]
     output_dir.mkdir(parents=True, exist_ok=True)
+    log(f"Output directory: {output_dir.resolve()}")
     env_id = profile["environment_id"]
+    log(f"Creating environment {env_id}")
     env_cfg = parse_env_cfg(env_id, device=args.device, num_envs=1)
     env_cfg.sim.render_interval = 1
     env = gym.make(env_id, cfg=env_cfg, render_mode="rgb_array")
     policy_env = env.unwrapped
+    log(f"Loading policy from {args.model_path}")
     policy = Gr00tPolicy(
         embodiment_tag=EmbodimentTag.resolve(profile["embodiment_tag"]),
         model_path=str(args.model_path),
@@ -132,6 +142,7 @@ def evaluate_profile(profile: dict) -> None:
             writer = csv.DictWriter(result_file, fieldnames=["episode", "success", "steps"])
             writer.writeheader()
             for episode in range(args.episodes):
+                log(f"Starting {profile['name']} episode {episode}")
                 obs, _ = env.reset()
                 policy.reset()
                 frames = []
@@ -167,8 +178,8 @@ def evaluate_profile(profile: dict) -> None:
                 _save_video(frames, video_path, int(profile["fps"]))
                 writer.writerow({"episode": episode, "success": int(success), "steps": steps})
                 result_file.flush()
-                print(f"[{profile['name']}] episode {episode}: success={success}, steps={steps}")
-        print(
+                log(f"[{profile['name']}] episode {episode}: success={success}, steps={steps}")
+        log(
             f"[{profile['name']}] success rate: {successes}/{args.episodes} "
             f"= {successes / max(args.episodes, 1):.3f}"
         )
@@ -185,5 +196,9 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except Exception as exc:
+        log(f"FAILED: {type(exc).__name__}: {exc}")
+        raise
     finally:
+        log("Closing simulation application")
         simulation_app.close()
