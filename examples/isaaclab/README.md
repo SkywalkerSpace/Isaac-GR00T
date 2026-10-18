@@ -53,7 +53,7 @@ training schedule.
 Run with Isaac Lab and this GR00T checkout importable in the same environment:
 
 ```bash
-python examples/isaaclab/rollout_isaaclab.py \
+CUDA_VISIBLE_DEVICES=3  python examples/isaaclab/rollout_isaaclab.py \
   --model-path /home/mayuhang/Isaac-GR00T/examples/isaaclab/outputs/isaaclab_multi_robot/isaaclab_multi_robot_n1d7/ --profile pick_place_gr1t2
 ```
 

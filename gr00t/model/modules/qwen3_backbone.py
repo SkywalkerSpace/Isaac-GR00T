@@ -169,8 +169,14 @@ class Qwen3Backbone(torch.nn.Module):
     def forward(self, vl_input: BatchFeature) -> BatchFeature:
         self.set_frozen_modules_to_eval_mode()
         # 0. Set frozen module to eval
+        # Transformers versions that support Qwen3-VL M-RoPE require
+        # mm_token_type_ids whenever image/video grid metadata is present.
+        # Older processors do not return this field, so only forward it when
+        # available and retain the required text/vision inputs as before.
         keys_to_use = ["input_ids", "attention_mask", "pixel_values", "image_grid_thw"]
-        vl_input = {k: vl_input[k] for k in keys_to_use}
+        if "mm_token_type_ids" in vl_input:
+            keys_to_use.append("mm_token_type_ids")
+        vl_input = {k: vl_input[k] for k in keys_to_use if k in vl_input}
         outputs = self.model(**vl_input, output_hidden_states=True)
         outputs = outputs.hidden_states[-1]
         image_mask = vl_input["input_ids"] == self.model.config.image_token_id
