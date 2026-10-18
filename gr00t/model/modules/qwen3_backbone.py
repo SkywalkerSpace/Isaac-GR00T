@@ -100,9 +100,14 @@ class Qwen3Backbone(torch.nn.Module):
                 **transformers_loading_kwargs,
             ).eval()
 
+        # Transformers versions differ on whether the text and vision modules
+        # are exposed directly or through the conditional-generation model's
+        # inner Qwen3VLModel.
+        language_model = self._language_model
+
         # needed since we don't use these layers. Also saves compute
-        while len(self.model.language_model.layers) > select_layer:
-            self.model.language_model.layers.pop(-1)
+        while len(language_model.layers) > select_layer:
+            language_model.layers.pop(-1)
 
         self.select_layer = select_layer
         self.set_trainable_parameters(tune_llm, tune_visual, tune_top_llm_layers)
@@ -113,18 +118,30 @@ class Qwen3Backbone(torch.nn.Module):
                     p.data = p.data.to(torch.float32)
                     logger.debug(f"Casting trainable parameter {n} to fp32")
 
+    @property
+    def _language_model(self):
+        if hasattr(self.model, "language_model"):
+            return self.model.language_model
+        return self.model.model.language_model
+
+    @property
+    def _visual_model(self):
+        if hasattr(self.model, "visual"):
+            return self.model.visual
+        return self.model.model.visual
+
     def set_trainable_parameters(self, tune_llm: bool, tune_visual: bool, tune_top_llm_layers: int):
         self.tune_llm = tune_llm
         self.tune_visual = tune_visual
         for p in self.parameters():
             p.requires_grad = True
         if not tune_llm:
-            self.model.language_model.requires_grad_(False)
+            self._language_model.requires_grad_(False)
         if not tune_visual:
-            self.model.visual.requires_grad_(False)
+            self._visual_model.requires_grad_(False)
 
         if tune_top_llm_layers > 0:
-            for layer in self.model.language_model.layers[-tune_top_llm_layers:]:
+            for layer in self._language_model.layers[-tune_top_llm_layers:]:
                 for param in layer.parameters():
                     param.requires_grad = True
 
@@ -144,10 +161,10 @@ class Qwen3Backbone(torch.nn.Module):
         need to call model.eval() for the frozen modules.
         """
         if self.training:
-            if self.model.language_model and not self.tune_llm:
-                self.model.language_model.eval()
-            if self.model.visual and not self.tune_visual:
-                self.model.visual.eval()
+            if self._language_model and not self.tune_llm:
+                self._language_model.eval()
+            if self._visual_model and not self.tune_visual:
+                self._visual_model.eval()
 
     def prepare_input(self, batch: dict) -> BatchFeature:
         return BatchFeature(data=batch)
