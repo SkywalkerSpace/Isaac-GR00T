@@ -25,6 +25,8 @@ from typing import Any
 
 import numpy as np
 import torch
+from torch.overrides import _get_current_function_mode_stack
+from torch.utils._device import DeviceContext
 from transformers import AutoModel, AutoProcessor
 
 from gr00t.data.embodiment_tags import FINETUNE_ONLY_TAGS, POSTTRAIN_TAGS, EmbodimentTag
@@ -96,12 +98,18 @@ class Gr00tPolicy(BasePolicy):
             embodiment_tag = EmbodimentTag.resolve(embodiment_tag)
         model_dir = Path(model_path)
 
-        # Isaac Lab may leave PyTorch's global default device set to ``meta``.
-        # Transformers interprets any non-CPU default as an implicit device_map;
-        # ``from_pretrained`` needs accelerate for that path and rejects meta.
-        # Clear only a global meta default during weight loading, then restore it.
+        # Isaac Lab may leave PyTorch in a ``meta`` device context. Transformers
+        # rejects that context for from_pretrained, which must materialize real
+        # checkpoint weights. Temporarily shadow it with CPU during loading;
+        # model.to() below moves the loaded model to the requested device.
         previous_device = torch.get_default_device()
-        if previous_device.type == "meta":
+        has_device_context = any(
+            isinstance(mode, DeviceContext) for mode in _get_current_function_mode_stack()
+        )
+        if previous_device.type == "meta" and has_device_context:
+            with torch.device("cpu"):
+                model = AutoModel.from_pretrained(model_dir)
+        elif previous_device.type == "meta":
             try:
                 torch.set_default_device("cpu")
                 model = AutoModel.from_pretrained(model_dir)
