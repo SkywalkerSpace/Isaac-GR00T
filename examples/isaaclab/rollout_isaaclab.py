@@ -35,6 +35,7 @@ import numpy as np
 import torch
 
 import isaaclab_tasks  # noqa: F401
+import isaaclab_mimic  # noqa: F401 - registers Mimic rollout environment IDs
 from gr00t.data.embodiment_tags import EmbodimentTag
 from gr00t.policy.gr00t_policy import Gr00tPolicy
 from isaaclab_tasks.utils import parse_env_cfg
