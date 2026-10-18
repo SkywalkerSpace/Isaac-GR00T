@@ -96,17 +96,19 @@ class Gr00tPolicy(BasePolicy):
             embodiment_tag = EmbodimentTag.resolve(embodiment_tag)
         model_dir = Path(model_path)
 
-        # Isaac Lab and some launchers leave PyTorch's default device set to
-        # ``meta`` while constructing simulation/model state. Transformers
-        # rejects ``from_pretrained`` in that context because checkpoint
-        # weights must be materialized on a real device. Scope the default
-        # device to the requested inference device and restore it immediately.
+        # Isaac Lab may leave PyTorch's global default device set to ``meta``.
+        # Transformers interprets any non-CPU default as an implicit device_map;
+        # ``from_pretrained`` needs accelerate for that path and rejects meta.
+        # Clear only a global meta default during weight loading, then restore it.
         previous_device = torch.get_default_device()
-        try:
-            torch.set_default_device(device)
+        if previous_device.type == "meta":
+            try:
+                torch.set_default_device("cpu")
+                model = AutoModel.from_pretrained(model_dir)
+            finally:
+                torch.set_default_device(previous_device)
+        else:
             model = AutoModel.from_pretrained(model_dir)
-        finally:
-            torch.set_default_device(previous_device)
         model.eval()  # Set model to evaluation mode
         model.to(device=device, dtype=torch.bfloat16)
         self.model = model
