@@ -96,27 +96,10 @@ class Gr00tPolicy(BasePolicy):
             embodiment_tag = EmbodimentTag.resolve(embodiment_tag)
         model_dir = Path(model_path)
 
-        # Isaac Lab may leave PyTorch in a ``meta`` device context. Transformers
-        # rejects that context for from_pretrained, which must materialize real
-        # checkpoint weights. Temporarily shadow it with CPU during loading;
-        # model.to() below moves the loaded model to the requested device.
-        from transformers.modeling_utils import get_torch_context_manager_or_global_device
-
-        previous_device = torch.get_default_device()
-        context_device = get_torch_context_manager_or_global_device()
-        if context_device is not None and context_device.type == "meta":
-            with torch.device("cpu"):
-                if get_torch_context_manager_or_global_device() is not None:
-                    raise RuntimeError("Could not clear the active meta device context for model loading")
-                model = AutoModel.from_pretrained(model_dir)
-        elif previous_device.type == "meta":
-            try:
-                torch.set_default_device("cpu")
-                model = AutoModel.from_pretrained(model_dir)
-            finally:
-                torch.set_default_device(previous_device)
-        else:
-            model = AutoModel.from_pretrained(model_dir)
+        # Keep Transformers' native meta-device checkpoint loading enabled.
+        # Nested base-model loading handles its own device context in the
+        # backbone constructor.
+        model = AutoModel.from_pretrained(model_dir)
         model.eval()  # Set model to evaluation mode
         model.to(device=device, dtype=torch.bfloat16)
         self.model = model

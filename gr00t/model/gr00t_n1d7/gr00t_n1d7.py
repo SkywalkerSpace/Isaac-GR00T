@@ -99,7 +99,13 @@ class Gr00tN1d7ActionHead(nn.Module):
         # State dropout parameters
         self.state_dropout_prob = config.state_dropout_prob
 
-        self.beta_dist = Beta(config.noise_beta_alpha, config.noise_beta_beta)
+        # Distribution parameters are scalar constants, not model weights.
+        # Keep them on CPU so Beta's argument validation remains valid when
+        # Transformers constructs the surrounding model on the meta device.
+        self.beta_dist = Beta(
+            torch.tensor(config.noise_beta_alpha, device="cpu"),
+            torch.tensor(config.noise_beta_beta, device="cpu"),
+        )
         self.num_timestep_buckets = config.num_timestep_buckets
         self.set_trainable_parameters(
             config.tune_projector, config.tune_diffusion_model, config.tune_vlln
@@ -516,26 +522,6 @@ class Gr00tN1d7(PreTrainedModel):
         Note: During training, transformers parameters are passed from training config.
               During inference (e.g., from_pretrained), defaults are used.
         """
-        from transformers.modeling_utils import get_torch_context_manager_or_global_device
-
-        # PreTrainedModel.from_pretrained may instantiate this class under a
-        # meta-device context. GR00T's constructor also loads a real pretrained
-        # Qwen backbone and creates objects (such as torch.distributions.Beta)
-        # that require materialized tensors. Construct the complete module on
-        # CPU; the outer from_pretrained call will load the GR00T checkpoint
-        # weights after this constructor returns.
-        context_device = get_torch_context_manager_or_global_device()
-        if context_device is not None and context_device.type == "meta":
-            with torch.device("cpu"):
-                if get_torch_context_manager_or_global_device() is not None:
-                    raise RuntimeError("Could not clear the active meta device context for GR00T initialization")
-                self._initialize_modules(config, transformers_loading_kwargs)
-        else:
-            self._initialize_modules(config, transformers_loading_kwargs)
-
-    def _initialize_modules(
-        self, config: Gr00tN1d7Config, transformers_loading_kwargs: dict
-    ) -> None:
         super().__init__(config)
         self.config = config
 
