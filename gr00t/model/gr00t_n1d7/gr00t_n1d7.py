@@ -516,6 +516,26 @@ class Gr00tN1d7(PreTrainedModel):
         Note: During training, transformers parameters are passed from training config.
               During inference (e.g., from_pretrained), defaults are used.
         """
+        from transformers.modeling_utils import get_torch_context_manager_or_global_device
+
+        # PreTrainedModel.from_pretrained may instantiate this class under a
+        # meta-device context. GR00T's constructor also loads a real pretrained
+        # Qwen backbone and creates objects (such as torch.distributions.Beta)
+        # that require materialized tensors. Construct the complete module on
+        # CPU; the outer from_pretrained call will load the GR00T checkpoint
+        # weights after this constructor returns.
+        context_device = get_torch_context_manager_or_global_device()
+        if context_device is not None and context_device.type == "meta":
+            with torch.device("cpu"):
+                if get_torch_context_manager_or_global_device() is not None:
+                    raise RuntimeError("Could not clear the active meta device context for GR00T initialization")
+                self._initialize_modules(config, transformers_loading_kwargs)
+        else:
+            self._initialize_modules(config, transformers_loading_kwargs)
+
+    def _initialize_modules(
+        self, config: Gr00tN1d7Config, transformers_loading_kwargs: dict
+    ) -> None:
         super().__init__(config)
         self.config = config
 
@@ -533,7 +553,6 @@ class Gr00tN1d7(PreTrainedModel):
             transformers_loading_kwargs=transformers_loading_kwargs,
         )
 
-        # Initialize action head
         self.action_head = Gr00tN1d7ActionHead(config)
         from .processing_gr00t_n1d7 import Gr00tN1d7DataCollator
 

@@ -77,28 +77,11 @@ class Qwen3Backbone(torch.nn.Module):
         if load_bf16:
             extra_kwargs["torch_dtype"] = torch.bfloat16
 
-        # This constructor is called while Transformers is instantiating the
-        # outer GR00T checkpoint. That outer loader may use a meta device
-        # context, but this nested load reads real pretrained backbone weights.
-        # Override the inherited context just for this from_pretrained call.
-        from transformers.modeling_utils import get_torch_context_manager_or_global_device
-
-        context_device = get_torch_context_manager_or_global_device()
-        if context_device is not None and context_device.type == "meta":
-            with torch.device("cpu"):
-                if get_torch_context_manager_or_global_device() is not None:
-                    raise RuntimeError("Could not clear the active meta device context for backbone loading")
-                self.model = Qwen3VLForConditionalGeneration.from_pretrained(
-                    model_name,
-                    **extra_kwargs,
-                    **transformers_loading_kwargs,
-                ).eval()
-        else:
-            self.model = Qwen3VLForConditionalGeneration.from_pretrained(
-                model_name,
-                **extra_kwargs,
-                **transformers_loading_kwargs,
-            ).eval()
+        self.model = Qwen3VLForConditionalGeneration.from_pretrained(
+            model_name,
+            **extra_kwargs,
+            **transformers_loading_kwargs,
+        ).eval()
 
         # Transformers versions differ on whether the text and vision modules
         # are exposed directly or through the conditional-generation model's
