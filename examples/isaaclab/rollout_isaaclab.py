@@ -17,9 +17,6 @@ parser.add_argument("--max-steps", type=int, default=500)
 parser.add_argument("--action-steps", type=int, default=8)
 parser.add_argument("--language", default=None)
 parser.add_argument("--video-dir", type=Path, default=Path("./outputs/isaaclab_rollout"))
-# Isaac Lab's launcher accepts this flag in supported releases. Define it here
-# as well so the script remains usable with versions whose launcher omits it.
-parser.add_argument("--headless", action="store_true", help="Run without creating a Kit window")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
