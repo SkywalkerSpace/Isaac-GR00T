@@ -50,6 +50,10 @@ training schedule.
 
 ## Roll out in Isaac Lab
 
+```
+apt install -y vulkan-tools python3.10-dev
+```
+
 Run with Isaac Lab and this GR00T checkout importable in the same environment:
 
 ```bash
@@ -59,3 +63,4 @@ CUDA_VISIBLE_DEVICES=3  python examples/isaaclab/rollout_isaaclab.py \
 
 Use `--all-profiles` to evaluate every configured environment. Results are
 written to a separate subdirectory per profile under `./outputs/isaaclab_rollout`.
+
