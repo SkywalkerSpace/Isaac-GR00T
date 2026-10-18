@@ -548,6 +548,19 @@ class Gr00tN1d7(PreTrainedModel):
             transformers_loading_kwargs=transformers_loading_kwargs,
         )
 
+        # Transformers 5.x requires an expanded tied-weight mapping when
+        # finalizing from_pretrained loads. Older versions use the legacy
+        # _tied_weights_keys metadata and do not require this instance field.
+        # Do not call post_init() here: that would reinitialize modules and
+        # change the direct-construction training path.
+        if hasattr(self, "get_expanded_tied_weights_keys"):
+            self.all_tied_weights_keys = self.get_expanded_tied_weights_keys(all_submodels=True)
+        else:
+            legacy_tied_weights = getattr(self, "_tied_weights_keys", {})
+            self.all_tied_weights_keys = (
+                legacy_tied_weights if isinstance(legacy_tied_weights, dict) else {}
+            )
+
     def prepare_input(self, inputs: dict) -> Tuple[BatchFeature, BatchFeature]:
         """Prepare inputs for backbone and action head."""
 
