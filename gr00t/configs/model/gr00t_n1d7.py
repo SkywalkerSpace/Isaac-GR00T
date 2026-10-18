@@ -24,7 +24,7 @@ from transformers import PretrainedConfig
 from . import register_model_config
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Gr00tN1d7Config(PretrainedConfig):
     """Unified configuration for Gr00tN1d7 model with backbone and action head.
 
