@@ -14,11 +14,15 @@ parser.add_argument("--profiles", type=Path, default=Path(__file__).with_name("p
 parser.add_argument("--profile", help="Profile name; defaults to the first profile")
 parser.add_argument("--all-profiles", action="store_true", help="Evaluate all configured environments")
 parser.add_argument("--model-path", required=True, type=Path)
-parser.add_argument("--episodes", type=int, default=10)
+parser.add_argument("--episodes", type=int, default=5)
 parser.add_argument("--max-steps", type=int, default=500)
 parser.add_argument("--action-steps", type=int, default=8)
 parser.add_argument("--language", default=None)
 parser.add_argument("--video-dir", type=Path, default=Path("./outputs/isaaclab_rollout"))
+parser.add_argument(
+    "--debug-camera", action="store_true",
+    help="Log camera observation statistics and save raw/reset PNG snapshots",
+)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -48,6 +52,53 @@ def _numpy(value) -> np.ndarray:
     if isinstance(value, torch.Tensor):
         value = value.detach().cpu().numpy()
     return np.asarray(value)
+
+
+def _camera_frame(obs: dict, camera_env_key: str) -> np.ndarray:
+    policy_obs = obs.get("policy", obs)
+    if camera_env_key not in policy_obs:
+        raise KeyError(
+            f"Camera key {camera_env_key!r} not found in observation; "
+            f"available keys: {list(policy_obs.keys())}"
+        )
+    image = _numpy(policy_obs[camera_env_key])
+    if image.ndim == 4:
+        if image.shape[0] != 1:
+            raise ValueError(f"Expected one environment in camera batch, got {image.shape}")
+        image = image[0]
+    if image.ndim != 3 or image.shape[-1] < 3:
+        raise ValueError(f"Expected camera image with shape HxWxC (C>=3), got {image.shape}")
+    return image
+
+
+def _log_camera_stats(label: str, image: np.ndarray) -> None:
+    image = np.asarray(image)
+    finite = image[np.isfinite(image)] if np.issubdtype(image.dtype, np.number) else image
+    if finite.size:
+        stats = (
+            f"min={finite.min():.4g}, max={finite.max():.4g}, "
+            f"mean={finite.mean():.4g}, nonzero={np.count_nonzero(finite)}/{finite.size}"
+        )
+    else:
+        stats = "no finite values"
+    channel_means = np.mean(image[..., :3], axis=(0, 1)) if image.ndim == 3 else []
+    log(
+        f"Camera {label}: shape={image.shape}, dtype={image.dtype}, {stats}, "
+        f"RGB_means={np.array2string(channel_means, precision=3)}"
+    )
+
+
+def _save_camera_snapshot(image: np.ndarray, path: Path) -> None:
+    frame = np.asarray(image)
+    if frame.dtype != np.uint8:
+        if np.issubdtype(frame.dtype, np.floating) and frame.size and np.nanmax(frame) <= 1.0:
+            frame = frame * 255.0
+        frame = np.nan_to_num(frame, nan=0.0, posinf=255.0, neginf=0.0)
+        frame = np.clip(frame, 0, 255).astype(np.uint8)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(path), cv2.cvtColor(frame[..., :3], cv2.COLOR_RGB2BGR)):
+        raise RuntimeError(f"Could not save camera snapshot to {path}")
+    log(f"Saved raw camera snapshot to {path}")
 
 
 def _env_observation_to_policy(obs: dict, instruction: str, modality: dict, profile: dict) -> dict:
@@ -81,7 +132,7 @@ def _action_to_env(action_dict: dict[str, np.ndarray], profile: dict, index: int
     return action.astype(np.float32)
 
 
-def _save_video(frames: list[np.ndarray], path: Path, fps: int) -> None:
+def _save_video(frames: list[np.ndarray], path: Path, fps: int, debug: bool = False) -> None:
     if not frames:
         raise RuntimeError(f"No camera frames were captured; cannot write {path}")
     normalized = []
@@ -97,6 +148,9 @@ def _save_video(frames: list[np.ndarray], path: Path, fps: int) -> None:
         normalized.append(frame)
 
     height, width = normalized[0].shape[:2]
+    if debug:
+        _log_camera_stats("first frame before video encoding", normalized[0])
+        _log_camera_stats("last frame before video encoding", normalized[-1])
     path.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
     if not writer.isOpened():
@@ -115,6 +169,16 @@ def _save_video(frames: list[np.ndarray], path: Path, fps: int) -> None:
     if not path.is_file() or path.stat().st_size == 0:
         raise RuntimeError(f"Video writer finished without creating a non-empty file: {path}")
     log(f"Saved {len(frames)} frames to {path} ({path.stat().st_size} bytes)")
+    if debug:
+        capture = cv2.VideoCapture(str(path))
+        try:
+            ok, decoded = capture.read()
+            if not ok:
+                log(f"WARNING: OpenCV could not decode the first frame from {path}")
+            else:
+                _log_camera_stats("first frame decoded from MP4 (BGR)", decoded)
+        finally:
+            capture.release()
 
 
 def evaluate_profile(profile: dict) -> None:
@@ -147,6 +211,11 @@ def evaluate_profile(profile: dict) -> None:
                 log(f"Starting {profile['name']} episode {episode}")
                 obs, _ = env.reset()
                 policy.reset()
+                reset_image = _camera_frame(obs, camera_env_key)
+                if args.debug_camera:
+                    _log_camera_stats(f"episode {episode} after reset ({camera_env_key})", reset_image)
+                    if episode == 0:
+                        _save_camera_snapshot(reset_image, output_dir / "debug_reset.png")
                 frames = []
                 success = False
                 steps = 0
@@ -161,10 +230,14 @@ def evaluate_profile(profile: dict) -> None:
                             torch.as_tensor(env_action, device=policy_env.device).unsqueeze(0)
                         )
                         steps += 1
-                        image = _numpy((obs.get("policy", obs))[camera_env_key])
-                        if image.ndim == 4:
-                            image = image[0]
-                        frames.append(np.asarray(image, dtype=np.uint8))
+                        image = _camera_frame(obs, camera_env_key)
+                        if args.debug_camera and steps == 1:
+                            _log_camera_stats(
+                                f"episode {episode} after first step ({camera_env_key})", image
+                            )
+                            if episode == 0:
+                                _save_camera_snapshot(image, output_dir / "debug_step1.png")
+                        frames.append(np.asarray(image).copy())
                         try:
                             success_value = policy_env.termination_manager.get_term("success")
                             success = success or bool(_numpy(success_value).any())
@@ -177,7 +250,7 @@ def evaluate_profile(profile: dict) -> None:
                         break
                 successes += int(success)
                 video_path = output_dir / f"episode_{episode:04d}.mp4"
-                _save_video(frames, video_path, int(profile["fps"]))
+                _save_video(frames, video_path, int(profile["fps"]), debug=args.debug_camera)
                 writer.writerow({"episode": episode, "success": int(success), "steps": steps})
                 result_file.flush()
                 log(f"[{profile['name']}] episode {episode}: success={success}, steps={steps}")
