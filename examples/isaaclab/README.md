@@ -54,7 +54,7 @@ Run with Isaac Lab and this GR00T checkout importable in the same environment:
 
 ```bash
 python examples/isaaclab/rollout_isaaclab.py \
-  --model-path /path/to/finetuned/checkpoint --profile pick_place_gr1t2 --headless
+  --model-path /home/mayuhang/Isaac-GR00T/examples/isaaclab/outputs/isaaclab_multi_robot/isaaclab_multi_robot_n1d7/ --profile pick_place_gr1t2 --headless
 ```
 
 Use `--all-profiles` to evaluate every configured environment. Results are

@@ -17,6 +17,9 @@ parser.add_argument("--max-steps", type=int, default=500)
 parser.add_argument("--action-steps", type=int, default=8)
 parser.add_argument("--language", default=None)
 parser.add_argument("--video-dir", type=Path, default=Path("./outputs/isaaclab_rollout"))
+# Isaac Lab's launcher accepts this flag in supported releases. Define it here
+# as well so the script remains usable with versions whose launcher omits it.
+parser.add_argument("--headless", action="store_true", help="Run without creating a Kit window")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -75,12 +78,37 @@ def _action_to_env(action_dict: dict[str, np.ndarray], profile: dict, index: int
 
 def _save_video(frames: list[np.ndarray], path: Path, fps: int) -> None:
     if not frames:
-        return
-    height, width = frames[0].shape[:2]
-    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+        raise RuntimeError(f"No camera frames were captured; cannot write {path}")
+    normalized = []
     for frame in frames:
-        writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-    writer.release()
+        frame = np.asarray(frame)
+        if frame.ndim != 3 or frame.shape[-1] < 3:
+            raise ValueError(f"Expected an HxWx3 camera frame, got shape {frame.shape}")
+        frame = frame[..., :3]
+        if frame.dtype != np.uint8:
+            if np.issubdtype(frame.dtype, np.floating) and frame.size and frame.max() <= 1.0:
+                frame = frame * 255.0
+            frame = np.clip(frame, 0, 255).astype(np.uint8)
+        normalized.append(frame)
+
+    height, width = normalized[0].shape[:2]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+    if not writer.isOpened():
+        writer.release()
+        raise RuntimeError(
+            f"OpenCV could not open an MP4 writer for {path}. Install an OpenCV build with "
+            "FFmpeg/GStreamer support or choose a different --video-dir/container."
+        )
+    try:
+        for frame in normalized:
+            if frame.shape[:2] != (height, width):
+                frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+            writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+    finally:
+        writer.release()
+    if not path.is_file() or path.stat().st_size == 0:
+        raise RuntimeError(f"Video writer finished without creating a non-empty file: {path}")
 
 
 def evaluate_profile(profile: dict) -> None:
@@ -89,7 +117,7 @@ def evaluate_profile(profile: dict) -> None:
     env_id = profile["environment_id"]
     env_cfg = parse_env_cfg(env_id, device=args.device, num_envs=1)
     env_cfg.sim.render_interval = 1
-    env = gym.make(env_id, cfg=env_cfg, render_mode=None)
+    env = gym.make(env_id, cfg=env_cfg, render_mode="rgb_array")
     policy_env = env.unwrapped
     policy = Gr00tPolicy(
         embodiment_tag=EmbodimentTag.resolve(profile["embodiment_tag"]),
