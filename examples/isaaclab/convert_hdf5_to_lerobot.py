@@ -40,6 +40,31 @@ def _read_state(obs: h5py.Group, length: int, state_fields: dict) -> dict[str, n
     return state
 
 
+def _validate_absolute_pose_actions(
+    actions: np.ndarray, action_fields: dict, demo_name: str
+) -> None:
+    """Catch joint-space data accidentally configured as absolute wrist poses."""
+    for key in ("arm_left", "arm_right"):
+        if key not in action_fields:
+            continue
+        start, end = action_fields[key]
+        if end - start != 7:
+            raise ValueError(
+                f"{demo_name} {key} action slice has {end - start} dimensions; "
+                "absolute wrist poses require [xyz, quaternion_xyzw] (7 dimensions)"
+            )
+        quaternion_norm = np.linalg.norm(actions[:, start + 3 : end], axis=-1)
+        invalid = ~np.isfinite(quaternion_norm) | (np.abs(quaternion_norm - 1.0) > 0.05)
+        if np.any(invalid):
+            first_bad = int(np.flatnonzero(invalid)[0])
+            raise ValueError(
+                f"{demo_name} {key} action does not look like an absolute wrist pose: "
+                f"quaternion norm at frame {first_bad} is {quaternion_norm[first_bad]:.4f}; "
+                "check profile action_source (use the environment input actions, not "
+                "post-IK processed_actions)"
+            )
+
+
 def convert(profile: dict) -> None:
     input_files = [Path(path) for path in profile["hdf5_inputs"]]
     output_dir = Path(profile["lerobot_dataset"])
@@ -74,6 +99,7 @@ def convert(profile: dict) -> None:
                 actions = np.asarray(demo[action_source], dtype=np.float32)
                 if actions.ndim != 2 or actions.shape[1] != action_dim:
                     raise ValueError(f"{demo_name} action shape {actions.shape}; expected (T, {action_dim})")
+                _validate_absolute_pose_actions(actions, action_fields, demo_name)
 
                 obs = demo["obs"]
                 length = min(int(demo.attrs.get("num_samples", len(actions))), len(actions))

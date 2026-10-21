@@ -12,7 +12,9 @@ profiles:
     task_description: Pick up the object and place it into the target container.
     fps: 20
     action_horizon: 16
-    action_source: processed_actions
+    # `actions` are the absolute wrist poses + hand targets consumed by env.step().
+    # `processed_actions` from the Pink IK recorder are solved arm joint targets.
+    action_source: actions
     require_success: true
     mix_ratio: 1.0
     action_fields:
