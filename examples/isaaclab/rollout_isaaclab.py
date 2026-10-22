@@ -109,6 +109,9 @@ def _env_observation_to_policy(obs: dict, instruction: str, modality: dict, prof
         if image.ndim == 4:
             image = image[0]
         if image.dtype != np.uint8:
+            if np.issubdtype(image.dtype, np.floating) and image.size and np.nanmax(image) <= 1.0:
+                image = image * 255.0
+            image = np.nan_to_num(image, nan=0.0, posinf=255.0, neginf=0.0)
             image = np.clip(image, 0, 255).astype(np.uint8)
         videos[key] = image[None, None, ...]
 
@@ -130,6 +133,22 @@ def _action_to_env(action_dict: dict[str, np.ndarray], profile: dict, index: int
     if action.shape != (profile["action_dim"],):
         raise ValueError(f"Policy action has shape {action.shape}; expected ({profile['action_dim']},)")
     return action.astype(np.float32)
+
+
+def _save_actions(actions: list[np.ndarray], path: Path, profile: dict) -> None:
+    """Save the actions actually sent to the environment, in profile order."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    columns = [
+        f"{key}_{dimension}"
+        for key, (start, end) in profile["action_fields"].items()
+        for dimension in range(end - start)
+    ]
+    with path.open("w", newline="") as action_file:
+        writer = csv.writer(action_file)
+        writer.writerow(["step", *columns])
+        for step, action in enumerate(actions):
+            writer.writerow([step, *np.asarray(action, dtype=np.float32).tolist()])
+    log(f"Saved {len(actions)} environment actions to {path}")
 
 
 def _save_video(frames: list[np.ndarray], path: Path, fps: int, debug: bool = False) -> None:
@@ -199,8 +218,7 @@ def evaluate_profile(profile: dict) -> None:
     )
     modality = policy.modality_configs
     instruction = args.language or profile["task_description"]
-    camera_key = next(iter(profile["camera_fields"]))
-    camera_env_key = profile["camera_fields"][camera_key]
+    camera_fields = profile["camera_fields"]
     results_path = output_dir / "results.csv"
     successes = 0
     try:
@@ -211,9 +229,13 @@ def evaluate_profile(profile: dict) -> None:
                 log(f"Starting {profile['name']} episode {episode}")
                 obs, _ = env.reset()
                 policy.reset()
-                reset_image = _camera_frame(obs, camera_env_key)
+                reset_images = {
+                    key: _camera_frame(obs, env_key)
+                    for key, env_key in camera_fields.items()
+                }
                 if args.debug_camera:
-                    _log_camera_stats(f"episode {episode} after reset ({camera_env_key})", reset_image)
+                    for key, image in reset_images.items():
+                        _log_camera_stats(f"episode {episode} after reset ({key})", image)
                     if episode == 0:
                         log(
                             "Render diagnostics: "
@@ -239,8 +261,10 @@ def evaluate_profile(profile: dict) -> None:
                                     f"renderer_cfg={getattr(sensor.cfg, 'renderer_cfg', 'n/a')}"
                                 )
                     if episode == 0:
-                        _save_camera_snapshot(reset_image, output_dir / "debug_reset.png")
-                frames = []
+                        for key, image in reset_images.items():
+                            _save_camera_snapshot(image, output_dir / f"debug_reset_{key}.png")
+                frames_by_camera = {key: [] for key in camera_fields}
+                executed_actions = []
                 success = False
                 steps = 0
                 for _ in range(args.max_steps):
@@ -250,18 +274,24 @@ def evaluate_profile(profile: dict) -> None:
                     chunk_len = min(args.action_steps, len(modality["action"].delta_indices))
                     for chunk_index in range(chunk_len):
                         env_action = _action_to_env(actions, profile, chunk_index)
+                        executed_actions.append(env_action.copy())
                         obs, _, terminated, truncated, info = env.step(
                             torch.as_tensor(env_action, device=policy_env.device).unsqueeze(0)
                         )
                         steps += 1
-                        image = _camera_frame(obs, camera_env_key)
+                        images = {
+                            key: _camera_frame(obs, env_key)
+                            for key, env_key in camera_fields.items()
+                        }
                         if args.debug_camera and steps == 1:
-                            _log_camera_stats(
-                                f"episode {episode} after first step ({camera_env_key})", image
-                            )
-                            if episode == 0:
-                                _save_camera_snapshot(image, output_dir / "debug_step1.png")
-                        frames.append(np.asarray(image).copy())
+                            for key, image in images.items():
+                                _log_camera_stats(f"episode {episode} after first step ({key})", image)
+                                if episode == 0:
+                                    _save_camera_snapshot(
+                                        image, output_dir / f"debug_step1_{key}.png"
+                                    )
+                        for key, image in images.items():
+                            frames_by_camera[key].append(np.asarray(image).copy())
                         try:
                             success_value = policy_env.termination_manager.get_term("success")
                             success = success or bool(_numpy(success_value).any())
@@ -273,8 +303,11 @@ def evaluate_profile(profile: dict) -> None:
                     if done or steps >= args.max_steps:
                         break
                 successes += int(success)
-                video_path = output_dir / f"episode_{episode:04d}.mp4"
-                _save_video(frames, video_path, int(profile["fps"]), debug=args.debug_camera)
+                for key, frames in frames_by_camera.items():
+                    video_path = output_dir / f"episode_{episode:04d}_{key}.mp4"
+                    _save_video(frames, video_path, int(profile["fps"]), debug=args.debug_camera)
+                actions_path = output_dir / f"episode_{episode:04d}_actions.csv"
+                _save_actions(executed_actions, actions_path, profile)
                 writer.writerow({"episode": episode, "success": int(success), "steps": steps})
                 result_file.flush()
                 log(f"[{profile['name']}] episode {episode}: success={success}, steps={steps}")
@@ -282,6 +315,15 @@ def evaluate_profile(profile: dict) -> None:
             f"[{profile['name']}] success rate: {successes}/{args.episodes} "
             f"= {successes / max(args.episodes, 1):.3f}"
         )
+        with results_path.open("a", newline="") as result_file:
+            writer = csv.DictWriter(result_file, fieldnames=["episode", "success", "steps"])
+            writer.writerow(
+                {
+                    "episode": "success_rate",
+                    "success": f"{successes / max(args.episodes, 1):.6f}",
+                    "steps": "",
+                }
+            )
     finally:
         env.close()
 
