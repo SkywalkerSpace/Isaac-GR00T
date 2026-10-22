@@ -16,7 +16,10 @@ parser.add_argument("--all-profiles", action="store_true", help="Evaluate all co
 parser.add_argument("--model-path", required=True, type=Path)
 parser.add_argument("--episodes", type=int, default=5)
 parser.add_argument("--max-steps", type=int, default=500)
-parser.add_argument("--action-steps", type=int, default=8)
+parser.add_argument(
+    "--action-steps", type=int, default=8,
+    help="How many predicted 20 Hz actions to execute before observing again (default: 8)",
+)
 parser.add_argument("--language", default=None)
 parser.add_argument("--video-dir", type=Path, default=Path("./outputs/isaaclab_rollout"))
 parser.add_argument(
@@ -25,6 +28,8 @@ parser.add_argument(
 )
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
+if args.action_steps < 1:
+    parser.error("--action-steps must be at least 1")
 
 
 def log(message: str) -> None:
@@ -267,11 +272,15 @@ def evaluate_profile(profile: dict) -> None:
                 executed_actions = []
                 success = False
                 steps = 0
-                for _ in range(args.max_steps):
+                for _ in range((args.max_steps + args.action_steps - 1) // args.action_steps):
                     policy_input = _env_observation_to_policy(obs, instruction, modality, profile)
                     actions, _ = policy.get_action(policy_input)
                     done = False
-                    chunk_len = min(args.action_steps, len(modality["action"].delta_indices))
+                    chunk_len = min(
+                        args.action_steps,
+                        len(modality["action"].delta_indices),
+                        args.max_steps - steps,
+                    )
                     for chunk_index in range(chunk_len):
                         env_action = _action_to_env(actions, profile, chunk_index)
                         executed_actions.append(env_action.copy())
