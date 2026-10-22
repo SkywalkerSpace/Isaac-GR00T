@@ -70,9 +70,9 @@ written to a separate subdirectory per profile under `./outputs/isaaclab_rollout
 
 uv run --index-strategy unsafe-best-match --extra isaacsim,mimic python scripts/imitation_learning/isaaclab_mimic/generate_dataset.py --device cpu --num_envs 40 --generation_num_trials 1000 --input_file /home/mayuhang/datasets/isaaclab/dataset_annotated_gr1_50.hdf5 --output_file ./datasets/generated_dataset_gr1i_50.hdf5
 
-python examples/isaaclab/convert_hdf5_to_lerobot.py --all-profiles
-
 ### gr00t
+
+python examples/isaaclab/convert_hdf5_to_lerobot.py --all-profiles
 
 ./examples/isaaclab/finetune.sh
 

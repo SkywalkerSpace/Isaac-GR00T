@@ -20,8 +20,13 @@ profiles:
     action_fields:
       arm_left: [0, 7]
       arm_right: [7, 14]
-      hand_left: [14, 25]
-      hand_right: [25, 36]
+      # The environment action packs finger joints by joint class, not by hand:
+      # left/right proximal, left/right intermediate, then both thumb distal.
+      hand_left_proximal: [14, 19]
+      hand_right_proximal: [19, 24]
+      hand_left_intermediate: [24, 29]
+      hand_right_intermediate: [29, 34]
+      hand_thumb_distal: [34, 36]
     state_fields:
       arm_left: [left_eef_pos, left_eef_quat]
       arm_right: [right_eef_pos, right_eef_quat]
