@@ -69,7 +69,7 @@ EMBODIMENT_TAG_TO_PROJECTOR_INDEX = {
     "simpler_env_widowx": 1,
     "libero_sim": 2,
     "new_embodiment": 10,
-    "isaaclab_custom": 10,
+    "isaaclab_custom": 12,
 }
 
 

@@ -158,16 +158,15 @@ class Gr00tN1d7Pipeline(ModelPipeline):
             for dataset in self.config.data.datasets
             if dataset.embodiment_tag and dataset.embodiment_tag.startswith("isaaclab_")
         })
-        available_ids = iter(sorted(set(range(self.model_config.max_num_embodiments)) - set(mapping.values())))
+        static_custom_id = mapping["isaaclab_custom"]
+        if static_custom_id >= self.model_config.max_num_embodiments:
+            raise ValueError(
+                f"Static Isaac Lab projector ID {static_custom_id} exceeds model capacity "
+                f"(max_num_embodiments={self.model_config.max_num_embodiments})"
+            )
         for tag in custom_tags:
             if tag not in mapping:
-                try:
-                    mapping[tag] = next(available_ids)
-                except StopIteration as exc:
-                    raise ValueError(
-                        f"More Isaac Lab embodiment profiles ({len(custom_tags)}) than available "
-                        f"projector IDs (max_num_embodiments={self.model_config.max_num_embodiments})"
-                    ) from exc
+                mapping[tag] = static_custom_id
         return mapping
 
     def _create_dataset(self, save_cfg_dir: Path):

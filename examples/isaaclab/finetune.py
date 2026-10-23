@@ -7,6 +7,7 @@ from pathlib import Path
 
 import yaml
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path(__file__).with_name("finetune_config.yaml"))
@@ -16,6 +17,9 @@ def main() -> None:
     from gr00t.configs.base_config import get_default_config
     from gr00t.configs.data.data_config import SingleDatasetConfig
     from gr00t.experiment.experiment import run
+    from gr00t.model.gr00t_n1d7.processing_gr00t_n1d7 import (
+        EMBODIMENT_TAG_TO_PROJECTOR_INDEX,
+    )
     from profile_utils import load_profiles
     from modality_config import build_modality_config
 
@@ -41,6 +45,20 @@ def main() -> None:
     profiles = load_profiles(args.profiles)
     if not profiles:
         raise ValueError("No robot/task profiles configured")
+    static_custom_id = EMBODIMENT_TAG_TO_PROJECTOR_INDEX["isaaclab_custom"]
+    if static_custom_id >= config.model.max_num_embodiments:
+        raise ValueError(
+            f"Static Isaac Lab projector ID {static_custom_id} exceeds model capacity "
+            f"(max_num_embodiments={config.model.max_num_embodiments})"
+        )
+    for profile in profiles:
+        tag = profile["embodiment_tag"]
+        if tag.startswith("isaaclab_"):
+            print(
+                f"[ISAACLAB FINETUNE] embodiment tag={tag!r}, "
+                f"processor.embodiment_id_mapping[{tag!r}]={static_custom_id}",
+                flush=True,
+            )
     config.data.datasets = []
     for profile in profiles:
         dataset_path = Path(profile["lerobot_dataset"])
