@@ -19,8 +19,8 @@ parser.add_argument("--model-path", required=True, type=Path)
 parser.add_argument("--episodes", type=int, default=5)
 parser.add_argument("--max-steps", type=int, default=500)
 parser.add_argument(
-    "--action-steps", type=int, default=8,
-    help="How many predicted 20 Hz actions to execute before observing again (default: 8)",
+    "--action-steps", type=int, default=16,
+    help="How many predicted 20 Hz actions to execute before observing again (default: 16)",
 )
 parser.add_argument("--language", default=None)
 parser.add_argument("--video-dir", type=Path, default=Path("./outputs/isaaclab_rollout"))
@@ -35,7 +35,7 @@ if args.action_steps < 1:
 
 
 def log(message: str) -> None:
-    tqdm.write(f"[ISAACLAB ROLLOUT] {message}", flush=True)
+    print(f"[ISAACLAB ROLLOUT] {message}", flush=True)
 
 app_launcher = AppLauncher(args, enable_cameras=True)
 simulation_app = app_launcher.app
@@ -162,6 +162,28 @@ def _save_actions(actions: list[tuple[datetime, np.ndarray]], path: Path, profil
     log(f"Saved {len(actions)} environment actions to {path}")
 
 
+def _save_predicted_actions(
+    chunks: list[tuple[int, int, int, np.ndarray]], path: Path, profile: dict
+) -> None:
+    """Save every predicted action and whether it was sent to the environment."""
+    columns = [
+        f"{key}_{dimension}"
+        for key, (start, end) in profile["action_fields"].items()
+        for dimension in range(end - start)
+    ]
+    with path.open("w", newline="") as action_file:
+        writer = csv.writer(action_file)
+        writer.writerow(["chunk", "action_index", "executed", *columns])
+        for chunk, action_index, executed_count, action in chunks:
+            writer.writerow([
+                chunk,
+                action_index,
+                int(action_index < executed_count),
+                *np.asarray(action, dtype=np.float32).tolist(),
+            ])
+    log(f"Saved {len(chunks)} predicted actions to {path}")
+
+
 def _save_video(frames: list[np.ndarray], path: Path, fps: int, debug: bool = False) -> None:
     if not frames:
         raise RuntimeError(f"No camera frames were captured; cannot write {path}")
@@ -228,6 +250,11 @@ def evaluate_profile(profile: dict) -> None:
         device=args.device,
     )
     modality = policy.modality_configs
+    configured_horizon = len(modality["action"].delta_indices)
+    log(
+        f"Action horizon: runtime={configured_horizon}, "
+        f"requested execution chunk={args.action_steps}; max_steps={args.max_steps}"
+    )
     instruction = args.language or profile["task_description"]
     camera_fields = profile["camera_fields"]
     results_path = output_dir / "results.csv"
@@ -276,17 +303,40 @@ def evaluate_profile(profile: dict) -> None:
                             _save_camera_snapshot(image, output_dir / f"debug_reset_{key}.png")
                 frames_by_camera = {key: [] for key in camera_fields}
                 executed_actions = []
+                predicted_actions = []
                 success = False
                 steps = 0
-                for _ in range((args.max_steps + args.action_steps - 1) // args.action_steps):
+                step_progress = tqdm(
+                    total=args.max_steps,
+                    desc=f"episode {episode} steps",
+                    unit="step",
+                    leave=False,
+                )
+                effective_chunk_steps = min(args.action_steps, configured_horizon)
+                chunk_limit = (
+                    args.max_steps + effective_chunk_steps - 1
+                ) // effective_chunk_steps
+                for chunk_number in range(chunk_limit):
                     policy_input = _env_observation_to_policy(obs, instruction, modality, profile)
                     actions, _ = policy.get_action(policy_input)
+                    prediction_length = len(next(iter(actions.values()))[0])
+                    if prediction_length != configured_horizon:
+                        raise ValueError(
+                            f"Policy returned {prediction_length} actions, but runtime modality "
+                            f"horizon is {configured_horizon}"
+                        )
                     done = False
                     chunk_len = min(
                         args.action_steps,
-                        len(modality["action"].delta_indices),
+                        prediction_length,
                         args.max_steps - steps,
                     )
+                    chunk_predictions = [
+                        (chunk_number, index, chunk_len, _action_to_env(actions, profile, index).copy())
+                        for index in range(prediction_length)
+                    ]
+                    predicted_actions.extend(chunk_predictions)
+                    executed_in_chunk = 0
                     for chunk_index in range(chunk_len):
                         env_action = _action_to_env(actions, profile, chunk_index)
                         executed_actions.append((datetime.now(timezone.utc), env_action.copy()))
@@ -294,6 +344,7 @@ def evaluate_profile(profile: dict) -> None:
                             torch.as_tensor(env_action, device=policy_env.device).unsqueeze(0)
                         )
                         steps += 1
+                        executed_in_chunk += 1
                         images = {
                             key: _camera_frame(obs, env_key)
                             for key, env_key in camera_fields.items()
@@ -313,16 +364,55 @@ def evaluate_profile(profile: dict) -> None:
                         except (AttributeError, ValueError, KeyError):
                             success = success or bool(_numpy(info.get("success", False)).any())
                         done = bool(_numpy(terminated).any() or _numpy(truncated).any())
+                        if done:
+                            termination_manager = getattr(policy_env, "termination_manager", None)
+                            triggered_terms = []
+                            if termination_manager is not None:
+                                for term_name in termination_manager.active_terms:
+                                    try:
+                                        term_value = _numpy(termination_manager.get_term(term_name))
+                                        if bool(term_value.any()):
+                                            triggered_terms.append(term_name)
+                                    except (AttributeError, KeyError, ValueError) as exc:
+                                        triggered_terms.append(f"{term_name}=unavailable({exc})")
+                            log(
+                                f"[{profile['name']}] episode {episode} ended at step {steps}: "
+                                f"terminated={bool(_numpy(terminated).any())}, "
+                                f"truncated={bool(_numpy(truncated).any())}, "
+                                f"triggered_terms={triggered_terms or 'none reported'}"
+                            )
                         if done or steps >= args.max_steps:
                             break
+                    for index in range(len(predicted_actions) - prediction_length, len(predicted_actions)):
+                        chunk, action_index, _, predicted_action = predicted_actions[index]
+                        predicted_actions[index] = (
+                            chunk, action_index, executed_in_chunk, predicted_action
+                        )
+                    step_progress.update(executed_in_chunk)
                     if done or steps >= args.max_steps:
                         break
+                step_progress.close()
+                if not done and steps < args.max_steps:
+                    log(
+                        f"[{profile['name']}] episode {episode} loop exhausted without done: "
+                        f"steps={steps}, max_steps={args.max_steps}, "
+                        f"chunks={chunk_number + 1}/{chunk_limit}, "
+                        f"action_steps={args.action_steps}, runtime_horizon={configured_horizon}, "
+                        f"effective_chunk_steps={effective_chunk_steps}"
+                    )
+                elif not done and steps >= args.max_steps:
+                    log(
+                        f"[{profile['name']}] episode {episode} reached max_steps="
+                        f"{args.max_steps} after {chunk_number + 1}/{chunk_limit} chunks"
+                    )
                 successes += int(success)
                 for key, frames in frames_by_camera.items():
                     video_path = output_dir / f"episode_{episode:04d}_{key}.mp4"
                     _save_video(frames, video_path, int(profile["fps"]), debug=args.debug_camera)
                 actions_path = output_dir / f"episode_{episode:04d}_actions.csv"
                 _save_actions(executed_actions, actions_path, profile)
+                predictions_path = output_dir / f"episode_{episode:04d}_predicted_actions.csv"
+                _save_predicted_actions(predicted_actions, predictions_path, profile)
                 writer.writerow({"episode": episode, "success": int(success), "steps": steps})
                 result_file.flush()
                 log(f"[{profile['name']}] episode {episode}: success={success}, steps={steps}")
