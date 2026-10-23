@@ -282,12 +282,39 @@ def evaluate_profile(profile: dict) -> None:
     env = gym.make(env_id, cfg=env_cfg, render_mode="rgb_array")
     policy_env = env.unwrapped
     log(f"Loading policy from {args.model_path}")
+
+    # The base N1.7 checkpoint may expose a task-specific Isaac Lab modality
+    # (for example, isaaclab_custom_pick_place) instead of the generic tag
+    # used while fine-tuning custom embodiments (isaaclab_custom).
+    from transformers import AutoProcessor
+
+    model_path = args.model_path.expanduser()
+    processor_path = (
+        model_path / "processor"
+        if (model_path / "processor").is_dir()
+        and not (model_path / "processor_config.json").exists()
+        else model_path
+    )
+    checkpoint_processor = AutoProcessor.from_pretrained(processor_path)
+    checkpoint_tags = checkpoint_processor.get_modality_configs()
+    tag = profile["embodiment_tag"]
+    if tag not in checkpoint_tags:
+        isaaclab_tags = sorted(
+            value for value in checkpoint_tags
+            if value.startswith("isaaclab_custom_")
+        )
+        if len(isaaclab_tags) == 1:
+            tag = isaaclab_tags[0]
+            log(
+                f"Profile tag {profile['embodiment_tag']!r} is absent from checkpoint; "
+                f"using its sole Isaac Lab tag {tag!r}"
+            )
+
     policy = Gr00tPolicy(
-        embodiment_tag=EmbodimentTag.resolve(profile["embodiment_tag"]),
+        embodiment_tag=EmbodimentTag.resolve(tag),
         model_path=str(args.model_path),
         device=args.device,
     )
-    tag = profile["embodiment_tag"]
     processor_mapping = policy.processor.embodiment_id_mapping
     if tag not in processor_mapping:
         raise ValueError(
