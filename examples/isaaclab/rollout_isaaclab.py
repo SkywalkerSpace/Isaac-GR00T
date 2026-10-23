@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import sys
 import traceback
 from pathlib import Path
+from tqdm import tqdm
 
 from isaaclab.app import AppLauncher
 
@@ -34,7 +35,7 @@ if args.action_steps < 1:
 
 
 def log(message: str) -> None:
-    print(f"[ISAACLAB ROLLOUT] {message}", flush=True)
+    tqdm.write(f"[ISAACLAB ROLLOUT] {message}", flush=True)
 
 app_launcher = AppLauncher(args, enable_cameras=True)
 simulation_app = app_launcher.app
@@ -44,7 +45,6 @@ import cv2
 import gymnasium as gym
 import numpy as np
 import torch
-from tqdm import tqdm
 
 import isaaclab_tasks  # noqa: F401
 import isaaclab_mimic.envs  # noqa: F401 - importing the package registers Mimic Gym IDs
