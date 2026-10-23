@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import traceback
+import warnings
 from pathlib import Path
 from tqdm import tqdm
 
@@ -142,8 +143,8 @@ def _env_observation_to_policy(obs: dict, instruction: str, modality: dict, prof
 
 
 def _mp4v_torchcodec_roundtrip(image: np.ndarray, fps: int) -> np.ndarray:
-    """Match training's mp4v encoding and torchcodec decoding for one RGB frame."""
-    from gr00t.utils.video_utils import get_frames_by_indices
+    """Round-trip a frame through mp4v, using torchcodec when available."""
+    from gr00t.utils.video_utils import _is_backend_available, get_frames_by_indices
 
     frame = np.asarray(image)
     if frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[-1] != 3:
@@ -162,9 +163,25 @@ def _mp4v_torchcodec_roundtrip(image: np.ndarray, fps: int) -> np.ndarray:
             writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
         finally:
             writer.release()
-        decoded = get_frames_by_indices(str(video_path), [0], video_backend="torchcodec")
+        if _is_backend_available("torchcodec"):
+            decoded = get_frames_by_indices(str(video_path), [0], video_backend="torchcodec")
+        else:
+            warnings.warn(
+                "torchcodec is not available; decoding rollout frames with OpenCV instead. "
+                "Image preprocessing may differ slightly from training.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            capture = cv2.VideoCapture(str(video_path))
+            try:
+                ok, decoded_bgr = capture.read()
+            finally:
+                capture.release()
+            if not ok:
+                raise RuntimeError(f"OpenCV could not decode temporary MP4: {video_path}")
+            decoded = cv2.cvtColor(decoded_bgr, cv2.COLOR_BGR2RGB)[None, ...]
         if decoded.shape != (1, height, width, 3):
-            raise RuntimeError(f"torchcodec returned unexpected frame shape {decoded.shape}")
+            raise RuntimeError(f"Video decoder returned unexpected frame shape {decoded.shape}")
         return decoded[0]
     finally:
         try:
