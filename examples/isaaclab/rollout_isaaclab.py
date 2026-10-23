@@ -3,6 +3,7 @@
 
 import argparse
 import csv
+from datetime import datetime, timezone
 import sys
 import traceback
 from pathlib import Path
@@ -43,6 +44,7 @@ import cv2
 import gymnasium as gym
 import numpy as np
 import torch
+from tqdm import tqdm
 
 import isaaclab_tasks  # noqa: F401
 import isaaclab_mimic.envs  # noqa: F401 - importing the package registers Mimic Gym IDs
@@ -140,7 +142,7 @@ def _action_to_env(action_dict: dict[str, np.ndarray], profile: dict, index: int
     return action.astype(np.float32)
 
 
-def _save_actions(actions: list[np.ndarray], path: Path, profile: dict) -> None:
+def _save_actions(actions: list[tuple[datetime, np.ndarray]], path: Path, profile: dict) -> None:
     """Save the actions actually sent to the environment, in profile order."""
     path.parent.mkdir(parents=True, exist_ok=True)
     columns = [
@@ -150,9 +152,13 @@ def _save_actions(actions: list[np.ndarray], path: Path, profile: dict) -> None:
     ]
     with path.open("w", newline="") as action_file:
         writer = csv.writer(action_file)
-        writer.writerow(["step", *columns])
-        for step, action in enumerate(actions):
-            writer.writerow([step, *np.asarray(action, dtype=np.float32).tolist()])
+        writer.writerow(["step", "timestamp", *columns])
+        for step, (timestamp, action) in enumerate(actions):
+            writer.writerow([
+                step,
+                timestamp.isoformat(timespec="milliseconds"),
+                *np.asarray(action, dtype=np.float32).tolist(),
+            ])
     log(f"Saved {len(actions)} environment actions to {path}")
 
 
@@ -230,7 +236,7 @@ def evaluate_profile(profile: dict) -> None:
         with results_path.open("w", newline="") as result_file:
             writer = csv.DictWriter(result_file, fieldnames=["episode", "success", "steps"])
             writer.writeheader()
-            for episode in range(args.episodes):
+            for episode in tqdm(range(args.episodes), desc=f"{profile['name']} episodes", unit="episode"):
                 log(f"Starting {profile['name']} episode {episode}")
                 obs, _ = env.reset()
                 policy.reset()
@@ -283,7 +289,7 @@ def evaluate_profile(profile: dict) -> None:
                     )
                     for chunk_index in range(chunk_len):
                         env_action = _action_to_env(actions, profile, chunk_index)
-                        executed_actions.append(env_action.copy())
+                        executed_actions.append((datetime.now(timezone.utc), env_action.copy()))
                         obs, _, terminated, truncated, info = env.step(
                             torch.as_tensor(env_action, device=policy_env.device).unsqueeze(0)
                         )

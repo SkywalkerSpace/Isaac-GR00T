@@ -68,7 +68,7 @@ written to a separate subdirectory per profile under `./outputs/isaaclab_rollout
 
 ### isaaclab
 
-CUDA_VISIBLE_DEVICES=3  uv run --index-strategy unsafe-best-match --extra isaacsim,mimic python scripts/imitation_learning/isaaclab_mimic/generate_dataset.py --device cpu --num_envs 40 --generation_num_trials 1000 --input_file /home/mayuhang/datasets/isaaclab/dataset_annotated_gr1_50.hdf5 --output_file ./datasets/generated_dataset_gr1i_50.hdf5
+CUDA_VISIBLE_DEVICES=3  uv run --index-strategy unsafe-best-match --extra isaacsim,mimic python scripts/imitation_learning/isaaclab_mimic/generate_dataset.py --device cpu --num_envs 40 --generation_num_trials 1000 --input_file /home/mayuhang/datasets/isaaclab/dataset_annotated_gr1_50.hdf5 --output_file ./datasets/generated_dataset_gr1_50.hdf5
 
 ### gr00t
 
