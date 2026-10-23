@@ -13,6 +13,8 @@ from pathlib import Path
 from tqdm import tqdm
 
 from isaaclab.app import AppLauncher
+import json, pandas as pd
+from gr00t.utils.video_utils import get_frames_by_indices
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--profiles", type=Path, default=Path(__file__).with_name("profiles.yaml"))
@@ -140,6 +142,65 @@ def _env_observation_to_policy(obs: dict, instruction: str, modality: dict, prof
 
     language_key = modality["language"].modality_keys[0]
     return {"video": videos, "state": states, "language": {language_key: [[instruction]]}}
+
+
+def _diagnose_inputs(policy, live_input: dict, profile: dict, instruction: str) -> None:
+    """Compare policy predictions for live and first-frame training inputs."""
+    dataset = Path(profile["lerobot_dataset"])
+    parquet_path = dataset / "data/chunk-000/episode_000000.parquet"
+    modality_path = dataset / "meta/modality.json"
+    if not parquet_path.is_file() or not modality_path.is_file():
+        raise FileNotFoundError(
+            f"Input diagnosis requires {parquet_path} and {modality_path}"
+        )
+
+    first_state = np.stack(pd.read_parquet(parquet_path)["observation.state"])[0].astype(np.float32)
+    state_modality = json.loads(modality_path.read_text())["state"]
+    train_state = {
+        key: first_state[value["start"]:value["end"]]
+        for key, value in state_modality.items()
+    }
+    train_img = {
+        key: get_frames_by_indices(
+            str(dataset / f"videos/chunk-000/observation.images.{key}/episode_000000.mp4"),
+            [0], video_backend="torchcodec",
+        )[0]
+        for key in live_input["video"]
+    }
+    live_state = {key: value[0, 0] for key, value in live_input["state"].items()}
+    live_img = {key: value[0, 0] for key, value in live_input["video"].items()}
+
+    for key in train_state:
+        difference = np.abs(live_state[key] - train_state[key]).max()
+        print(f"[state diff] {key}: max|live-train|={difference:.3f}")
+        print("   live ", np.round(live_state[key], 3))
+        print("   train", np.round(train_state[key], 3))
+    for key in live_img:
+        print(
+            f"[img] {key}: live mean={live_img[key].mean():.1f} "
+            f"train mean={train_img[key].mean():.1f}"
+        )
+        comparison = np.concatenate([live_img[key], train_img[key]], axis=1)
+        path = args.video_dir / f"diag_{key}.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(path), cv2.cvtColor(comparison, cv2.COLOR_RGB2BGR)):
+            raise RuntimeError(f"Could not save input diagnostic image to {path}")
+
+    language = live_input["language"]
+    for state_source in ("train", "live"):
+        for image_source in ("train", "live"):
+            states = train_state if state_source == "train" else live_state
+            images = train_img if image_source == "train" else live_img
+            diagnostic_input = {
+                "video": {key: image[None, None] for key, image in images.items()},
+                "state": {key: state[None, None] for key, state in states.items()},
+                "language": language,
+            }
+            prediction, _ = policy.get_action(diagnostic_input)
+            print(
+                f"state={state_source:5s} img={image_source:5s} -> "
+                f"左臂z预测 {prediction['arm_left'][0, 0, 2]:.3f} (真值 1.259)"
+            )
 
 
 def _mp4v_torchcodec_roundtrip(image: np.ndarray, fps: int) -> np.ndarray:
@@ -374,6 +435,10 @@ def evaluate_profile(profile: dict) -> None:
                 log(f"Starting {profile['name']} episode {episode}")
                 obs, _ = env.reset()
                 policy.reset()
+                if episode == 0:
+                    live_input = _env_observation_to_policy(obs, instruction, modality, profile)
+                    _diagnose_inputs(policy, live_input, profile, instruction)
+                    policy.reset()
                 reset_images = {
                     key: _camera_frame(obs, env_key)
                     for key, env_key in camera_fields.items()
