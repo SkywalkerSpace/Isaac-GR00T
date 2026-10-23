@@ -316,13 +316,19 @@ def evaluate_profile(profile: dict) -> None:
         device=args.device,
     )
     processor_mapping = policy.processor.embodiment_id_mapping
-    if tag not in processor_mapping:
-        raise ValueError(
-            f"Checkpoint processor has no explicit projector ID for embodiment tag {tag!r}; "
-            "refusing to use the generic new_embodiment fallback. Use the matching checkpoint."
-        )
-    processor_id = processor_mapping[tag]
     expected_id = EMBODIMENT_TAG_TO_PROJECTOR_INDEX["isaaclab_custom"]
+    if tag not in processor_mapping:
+        if tag not in checkpoint_tags:
+            raise ValueError(
+                f"Checkpoint has no modality configuration for embodiment tag {tag!r}; "
+                "use a matching checkpoint."
+            )
+        # Older/base checkpoints can contain a task-specific modality without
+        # an explicit mapping entry. Isaac Lab custom embodiments share the
+        # reserved custom projector ID used by the training pipeline.
+        processor_mapping[tag] = expected_id
+        log(f"No projector mapping saved for {tag!r}; using Isaac Lab custom ID {expected_id}")
+    processor_id = processor_mapping[tag]
     if processor_id != expected_id:
         raise ValueError(
             f"Checkpoint maps embodiment tag {tag!r} to projector ID {processor_id}; "
