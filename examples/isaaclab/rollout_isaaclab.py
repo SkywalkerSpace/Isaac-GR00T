@@ -203,6 +203,67 @@ def _diagnose_inputs(policy, live_input: dict, profile: dict, instruction: str) 
             )
 
 
+def _replay_training_demo(env, policy_env, profile: dict) -> None:
+    """Replay the first demo from the profile's source HDF5 dataset."""
+    import h5py
+    from isaaclab.utils.datasets import HDF5DatasetFileHandler
+
+    dataset_path = Path(profile["hdf5_inputs"][0])
+    handler = HDF5DatasetFileHandler()
+    handler.open(str(dataset_path))
+    try:
+        episode_names = sorted(
+            handler.get_episode_names(), key=lambda name: int(name.split("_")[-1])
+        )
+        if not episode_names:
+            raise ValueError(f"No episodes found in {dataset_path}")
+        name = episode_names[0]
+        episode = handler.load_episode(name, policy_env.device)
+        if episode is None:
+            raise RuntimeError(f"Could not load episode {name!r} from {dataset_path}")
+        env.reset()
+        policy_env.reset_to(
+            episode.get_initial_state(),
+            torch.tensor([0], device=policy_env.device),
+            is_relative=True,
+        )
+
+        with h5py.File(dataset_path, "r") as h5_file:
+            demo = h5_file["data"][name]
+            obs_data = demo["obs"]
+            if "actions" not in demo:
+                raise KeyError(f"Missing actions for /data/{name} in {dataset_path}")
+            hand_camera = profile["camera_fields"].get("left_wrist_cam", "left_wrist_cam")
+            state_field = profile["state_fields"].get("arm_left", ["left_eef_pos"])[0]
+            if state_field not in obs_data:
+                raise KeyError(f"Missing /data/{name}/obs/{state_field}")
+            if hand_camera not in obs_data:
+                raise KeyError(f"Missing /data/{name}/obs/{hand_camera}")
+
+            actions = demo["actions"]
+            for timestep, action in enumerate(actions):
+                obs, *_ = env.step(torch.as_tensor(action, device=policy_env.device)[None])
+                if timestep % 20 == 0:
+                    policy_obs = obs["policy"]
+                    live_position = _numpy(policy_obs[state_field])[0]
+                    demo_position = obs_data[state_field][timestep]
+                    live_camera = _numpy(policy_obs[hand_camera])[0]
+                    demo_camera = obs_data[hand_camera][timestep]
+                    position_difference = np.abs(live_position - demo_position).max()
+                    log(
+                        f"[demo replay {name}] {timestep}: "
+                        f"左臂pos差 {position_difference:.3f}, "
+                        f"左腕图均值 live/hdf5 "
+                        f"{live_camera.mean():.1f}/{demo_camera.mean():.1f}"
+                    )
+            success = bool(
+                _numpy(policy_env.termination_manager.get_term("success")).any()
+            )
+            log(f"[demo replay {name}] success: {success}")
+    finally:
+        handler.close()
+
+
 def _mp4v_torchcodec_roundtrip(image: np.ndarray, fps: int) -> np.ndarray:
     """Round-trip a frame through mp4v, using torchcodec when available."""
     from gr00t.utils.video_utils import _is_backend_available, get_frames_by_indices
@@ -428,6 +489,7 @@ def evaluate_profile(profile: dict) -> None:
     results_path = output_dir / "results.csv"
     successes = 0
     try:
+        _replay_training_demo(env, policy_env, profile)
         with results_path.open("w", newline="") as result_file:
             writer = csv.DictWriter(result_file, fieldnames=["episode", "success", "steps"])
             writer.writeheader()
