@@ -4,7 +4,9 @@
 import argparse
 import csv
 from datetime import datetime, timezone
+import os
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 from tqdm import tqdm
@@ -137,6 +139,38 @@ def _env_observation_to_policy(obs: dict, instruction: str, modality: dict, prof
 
     language_key = modality["language"].modality_keys[0]
     return {"video": videos, "state": states, "language": {language_key: [[instruction]]}}
+
+
+def _mp4v_torchcodec_roundtrip(image: np.ndarray, fps: int) -> np.ndarray:
+    """Match training's mp4v encoding and torchcodec decoding for one RGB frame."""
+    from gr00t.utils.video_utils import get_frames_by_indices
+
+    frame = np.asarray(image)
+    if frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[-1] != 3:
+        raise ValueError(f"Expected uint8 RGB frame, got shape={frame.shape}, dtype={frame.dtype}")
+    height, width = frame.shape[:2]
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as video_file:
+        video_path = Path(video_file.name)
+    try:
+        writer = cv2.VideoWriter(
+            str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), int(fps), (width, height)
+        )
+        if not writer.isOpened():
+            writer.release()
+            raise RuntimeError(f"Could not open temporary mp4v writer: {video_path}")
+        try:
+            writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+        finally:
+            writer.release()
+        decoded = get_frames_by_indices(str(video_path), [0], video_backend="torchcodec")
+        if decoded.shape != (1, height, width, 3):
+            raise RuntimeError(f"torchcodec returned unexpected frame shape {decoded.shape}")
+        return decoded[0]
+    finally:
+        try:
+            os.unlink(video_path)
+        except FileNotFoundError:
+            pass
 
 
 def _action_to_env(action_dict: dict[str, np.ndarray], profile: dict, index: int) -> np.ndarray:
@@ -341,6 +375,10 @@ def evaluate_profile(profile: dict) -> None:
                 ) // effective_chunk_steps
                 for chunk_number in range(chunk_limit):
                     policy_input = _env_observation_to_policy(obs, instruction, modality, profile)
+                    for key, video_batch in policy_input["video"].items():
+                        policy_input["video"][key][0, 0] = _mp4v_torchcodec_roundtrip(
+                            video_batch[0, 0], int(profile["fps"])
+                        )
                     # Inspect the same processor path used by get_action and
                     # fail fast if its model input ID diverges from the checkpoint mapping.
                     processed_check = policy.processor([{
