@@ -308,7 +308,9 @@ def _diagnose_training_loss_and_reconstruction(policy, profile: dict, instructio
         processed = policy.processor([{
             "type": MessageType.EPISODE_STEP.value, "content": sample,
         }])
-        batch = policy.collate_fn([processed])
+        # The training collator returns model inputs nested under `inputs`;
+        # unwrap them before prepare_input, matching the Trainer data path.
+        batch = policy.collate_fn([processed])["inputs"]
         backbone_inputs, action_inputs = policy.model.prepare_input(batch)
         # Move and cast with the same contract as Gr00tN1d7.prepare_input.
         def move(x):
