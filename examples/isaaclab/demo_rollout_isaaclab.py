@@ -68,7 +68,10 @@ from profile_utils import load_profiles, select_profiles
 
 def _numpy(value) -> np.ndarray:
     if isinstance(value, torch.Tensor):
-        value = value.detach().cpu().numpy()
+        value = value.detach().cpu()
+        if value.dtype == torch.bfloat16:
+            value = value.float()
+        value = value.numpy()
     return np.asarray(value)
 
 
