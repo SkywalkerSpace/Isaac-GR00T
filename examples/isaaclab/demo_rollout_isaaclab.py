@@ -298,7 +298,9 @@ def _diagnose_training_loss_and_reconstruction(policy, profile: dict, instructio
     for start in range(0, nframes - horizon + 1, horizon):
         sample = VLAStepData(
             images={k: [v[start]] for k, v in frames.items()},
-            states={k: v[start] for k, v in state_values.items()},
+            # Training's extract_step_data supplies state as (state_history, D),
+            # even when the configured history is a single frame.
+            states={k: v[start][None, :] for k, v in state_values.items()},
             actions={k: v[start:start + horizon] for k, v in action_values.items()},
             text=instruction,
             embodiment=policy.embodiment_tag,
