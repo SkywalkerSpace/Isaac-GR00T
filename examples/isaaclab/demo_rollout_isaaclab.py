@@ -5,6 +5,7 @@ import argparse
 import csv
 from datetime import datetime, timezone
 import os
+import random
 import sys
 import tempfile
 import traceback
@@ -28,7 +29,11 @@ parser.add_argument(
     help="How many predicted 20 Hz actions to execute before observing again (default: 16)",
 )
 parser.add_argument("--offline-demo-diagnosis", action="store_true",
-                    help="Predict episode_000000's first 128 training frames in 16-frame chunks")
+                    help="Diagnose episode_000000 using rollout and training data paths")
+parser.add_argument("--diagnosis-batches", type=int, default=200,
+                    help="Maximum training-dataloader batches for train/eval loss diagnosis")
+parser.add_argument("--diagnosis-batch-size", type=int, default=1,
+                    help="Batch size for train/eval loss diagnosis (default: training global batch size 1)")
 parser.add_argument("--language", default=None)
 parser.add_argument("--video-dir", type=Path, default=Path("./outputs/isaaclab_rollout"))
 parser.add_argument(
@@ -39,6 +44,8 @@ AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 if args.action_steps < 1:
     parser.error("--action-steps must be at least 1")
+if args.diagnosis_batches < 1 or args.diagnosis_batch_size < 1:
+    parser.error("--diagnosis-batches and --diagnosis-batch-size must be at least 1")
 
 
 def log(message: str) -> None:
@@ -384,6 +391,136 @@ def _diagnose_training_loss_and_reconstruction(policy, profile: dict, instructio
             f"predicted velocity v: {' | '.join(velocity_stats)}"
         )
     policy.reset()
+
+
+def _diagnose_train_eval_batch_loss(
+    policy, profile: dict, batch_count: int = 200, batch_size: int = 1
+) -> None:
+    """Compare train/eval mode loss on episode zero via the training dataset path."""
+    from torch.utils.data import DataLoader
+
+    from gr00t.data.dataset.sharded_single_step_dataset import ShardedSingleStepDataset
+    from gr00t.data.embodiment_tags import EmbodimentTag
+    from modality_config import build_modality_config
+
+    dataset_path = Path(profile["lerobot_dataset"])
+    tag = profile["embodiment_tag"]
+    modality_config = build_modality_config(profile)
+    training_config_path = Path(args.model_path) / "config.yaml"
+    if training_config_path.is_file():
+        import yaml
+
+        saved_config = yaml.safe_load(training_config_path.read_text()) or {}
+        data_config = saved_config.get("data", {})
+    else:
+        data_config = {}
+    video_backend = data_config.get("video_backend", "torchcodec")
+    episode_sampling_rate = float(data_config.get("episode_sampling_rate", 0.1))
+    seed = int(data_config.get("seed", 42))
+    allow_padding = bool(data_config.get("allow_padding", False))
+    shard_size = int(data_config.get("shard_size", 1024))
+
+    train_dataset = ShardedSingleStepDataset(
+        dataset_path=dataset_path,
+        embodiment_tag=EmbodimentTag(tag),
+        modality_configs=modality_config,
+        video_backend=video_backend,
+        shard_size=shard_size,
+        episode_sampling_rate=episode_sampling_rate,
+        seed=seed,
+        allow_padding=allow_padding,
+    )
+    # Use the training processor, collator, and dataset-statistics merge.
+    dataset_statistics = train_dataset.get_dataset_statistics()
+    override_statistics = bool(data_config.get("override_pretraining_statistics", True))
+    policy.processor.set_statistics(
+        {tag: dataset_statistics},
+        override=override_statistics,
+    )
+    if not override_statistics:
+        train_dataset_statistics = policy.processor.statistics[tag]
+        policy.processor.set_statistics({tag: train_dataset_statistics}, override=True)
+    train_dataset.set_processor(policy.processor)
+    episode_index = next(
+        (idx for idx, meta in enumerate(train_dataset.episode_loader.episodes_metadata)
+         if int(meta["episode_index"]) == 0),
+        None,
+    )
+    if episode_index is None:
+        raise ValueError(f"{dataset_path} has no metadata entry for episode_000000")
+    episode_data = train_dataset.episode_loader[episode_index]
+    episode_length = train_dataset.get_effective_episode_length(episode_index)
+    if episode_length == 0:
+        raise ValueError(f"Episode 0 in {dataset_path} has no valid action windows")
+
+    # Training partitions each episode into 1 / episode_sampling_rate splits
+    # and samples each partition without replacement.
+    num_splits = max(1, int(1 / episode_sampling_rate))
+    split_indices = np.array_split(np.arange(episode_length), num_splits)
+    py_rng = random.Random(seed)
+    sampled_indices = []
+    for split in split_indices:
+        shuffled = split.tolist()
+        py_rng.shuffle(shuffled)
+        sampled_indices.extend(shuffled)
+        if len(sampled_indices) >= batch_count * batch_size:
+            break
+    window_indices = np.asarray(sampled_indices[: batch_count * batch_size], dtype=np.int64)
+    window_indices.sort()
+    sample_count = len(window_indices)
+
+    class EpisodeWindows(torch.utils.data.Dataset):
+        def __len__(self):
+            return sample_count
+
+        def __getitem__(self, index):
+            return train_dataset.get_datapoint(episode_data, int(window_indices[index]))
+
+    loader = DataLoader(
+        EpisodeWindows(), batch_size=batch_size, shuffle=False,
+        collate_fn=policy.collate_fn, drop_last=True,
+    )
+    model = policy.model
+    action_head = model.action_head
+    mode_losses = {"train": [], "eval": []}
+    rng_states = []
+    for _ in range(min(batch_count, len(loader))):
+        rng_states.append((
+            torch.random.get_rng_state(),
+            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        ))
+        torch.rand(1)
+        if torch.cuda.is_available():
+            torch.rand(1, device=model.device)
+    with torch.inference_mode():
+        for mode in ("train", "eval"):
+            model.train(mode == "train")
+            for batch_index, batch in enumerate(loader):
+                if batch_index >= batch_count:
+                    break
+                # Reuse identical noise and Beta-distributed t per batch in
+                # both modes so the comparison isolates train/eval behavior.
+                cpu_rng_state, cuda_rng_state = rng_states[batch_index]
+                torch.random.set_rng_state(cpu_rng_state)
+                if cuda_rng_state is not None:
+                    torch.cuda.set_rng_state_all(cuda_rng_state)
+                model_inputs = batch["inputs"]
+                backbone_inputs, action_inputs = model.prepare_input(model_inputs)
+                backbone_output = model.backbone(backbone_inputs)
+                result = action_head(backbone_output, action_inputs)
+                mode_losses[mode].append(float(result["loss"].float().cpu()))
+
+    for mode, values in mode_losses.items():
+        if not values:
+            raise ValueError(
+                f"No complete batches available for episode_000000 (batch_size={batch_size})"
+            )
+        log(
+            f"[training-dataloader episode_000000] mode={mode} "
+            f"batches={len(values)} batch_size={batch_size} "
+            f"mean_loss={np.mean(values):.6f} std={np.std(values):.6f}"
+        )
+    model.eval()
 def _replay_training_demo(env, policy_env, profile: dict, output_dir: Path) -> None:
     """Replay the first demo from the profile's source HDF5 dataset."""
     import h5py
@@ -681,6 +818,11 @@ def evaluate_profile(profile: dict) -> None:
         if args.offline_demo_diagnosis:
             _diagnose_offline_demo(policy, profile, instruction, output_dir)
             _diagnose_training_loss_and_reconstruction(policy, profile, instruction)
+            _diagnose_train_eval_batch_loss(
+                policy, profile,
+                batch_count=args.diagnosis_batches,
+                batch_size=args.diagnosis_batch_size,
+            )
             log("Offline demo diagnostics complete; skipping interactive episode rollouts")
             policy.reset()
             env.close()
