@@ -263,6 +263,19 @@ def _predict_flow_velocity(action_head, backbone_output, action_input, normalize
     return pred[:, -normalized_actions.shape[1]:], xt
 
 
+def _diagnostic_tensor_stats(value) -> str:
+    """Summarize a tensor/array without letting NaNs hide the failure point."""
+    array = _numpy(value).astype(np.float64, copy=False)
+    finite = array[np.isfinite(array)]
+    if finite.size == 0:
+        return f"shape={array.shape} finite=0/{array.size}"
+    return (
+        f"shape={array.shape} finite={finite.size}/{array.size} "
+        f"min={finite.min():.5g} max={finite.max():.5g} "
+        f"mean={finite.mean():.5g} std={finite.std():.5g}"
+    )
+
+
 def _diagnose_training_loss_and_reconstruction(policy, profile: dict, instruction: str) -> None:
     """Compare eval flow-matching loss, sampled actions, and one-step reconstruction."""
     from gr00t.data.types import MessageType, VLAStepData
@@ -327,10 +340,16 @@ def _diagnose_training_loss_and_reconstruction(policy, profile: dict, instructio
             # the training objective's x_t and velocity target definitions.
             generator = torch.Generator(device=gt_norm.device).manual_seed(1000 + start)
             noise = torch.randn(gt_norm.shape, dtype=gt_norm.dtype, device=gt_norm.device, generator=generator)
+            if start == 0:
+                log(f"[diagnostic tensors] normalized GT: {_diagnostic_tensor_stats(gt_norm)}")
+                log(f"[diagnostic tensors] action mask: {_diagnostic_tensor_stats(mask)}")
+                log(f"[diagnostic tensors] backbone features: {_diagnostic_tensor_stats(backbone_output['backbone_features'])}")
             losses = []
+            velocity_stats = []
             for time in time_grid:
                 t = torch.full((gt_norm.shape[0], 1, 1), time, device=gt_norm.device, dtype=gt_norm.dtype)
                 pred_v, _ = _predict_flow_velocity(action_head, backbone_output, action_inputs, gt_norm, noise, t)
+                velocity_stats.append(f"t={time:.1f} {_diagnostic_tensor_stats(pred_v)}")
                 target_v = gt_norm - noise
                 loss = (((pred_v - target_v) ** 2) * mask).sum() / (mask.sum() + 1e-6)
                 losses.append(float(loss.float().cpu()))
@@ -348,6 +367,8 @@ def _diagnose_training_loss_and_reconstruction(policy, profile: dict, instructio
             ])
             gt_chunk = actions_flat[start:start + horizon]
             sample_mae = float(np.mean(np.abs(sampled_flat - gt_chunk)))
+            if start == 0:
+                log(f"[diagnostic tensors] sampled actions: {_diagnostic_tensor_stats(sampled_flat)}")
 
             half_t = torch.full((gt_norm.shape[0], 1, 1), 0.5, device=gt_norm.device, dtype=gt_norm.dtype)
             pred_v, xt = _predict_flow_velocity(action_head, backbone_output, action_inputs, gt_norm, noise, half_t)
@@ -356,7 +377,8 @@ def _diagnose_training_loss_and_reconstruction(policy, profile: dict, instructio
         log(
             f"[train-vs-sample frame {start:03d}] eval flow loss(t={','.join(map(str,time_grid))})="
             f"{[round(v, 6) for v in losses]}, sampled MAE={sample_mae:.6f}, "
-            f"single-step t=0.5 normalized recon MAE={recon_mae:.6f}"
+            f"single-step t=0.5 normalized recon MAE={recon_mae:.6f}; "
+            f"predicted velocity v: {' | '.join(velocity_stats)}"
         )
     policy.reset()
 def _replay_training_demo(env, policy_env, profile: dict, output_dir: Path) -> None:
@@ -656,6 +678,10 @@ def evaluate_profile(profile: dict) -> None:
         if args.offline_demo_diagnosis:
             _diagnose_offline_demo(policy, profile, instruction, output_dir)
             _diagnose_training_loss_and_reconstruction(policy, profile, instruction)
+            log("Offline demo diagnostics complete; skipping interactive episode rollouts")
+            policy.reset()
+            env.close()
+            return
         _replay_training_demo(env, policy_env, profile, output_dir)
         with results_path.open("w", newline="") as result_file:
             writer = csv.DictWriter(result_file, fieldnames=["episode", "success", "steps"])
