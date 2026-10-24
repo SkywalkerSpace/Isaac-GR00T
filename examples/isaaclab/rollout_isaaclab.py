@@ -203,7 +203,7 @@ def _diagnose_inputs(policy, live_input: dict, profile: dict, instruction: str) 
             )
 
 
-def _replay_training_demo(env, policy_env, profile: dict) -> None:
+def _replay_training_demo(env, policy_env, profile: dict, output_dir: Path) -> None:
     """Replay the first demo from the profile's source HDF5 dataset."""
     import h5py
     from isaaclab.utils.datasets import HDF5DatasetFileHandler
@@ -233,6 +233,7 @@ def _replay_training_demo(env, policy_env, profile: dict) -> None:
             obs_data = demo["obs"]
             if "actions" not in demo:
                 raise KeyError(f"Missing actions for /data/{name} in {dataset_path}")
+            video_frames = {key: [] for key in profile["camera_fields"]}
             hand_camera = profile["camera_fields"].get("left_wrist_cam", "left_wrist_cam")
             state_field = profile["state_fields"].get("arm_left", ["left_eef_pos"])[0]
             if state_field not in obs_data:
@@ -243,6 +244,10 @@ def _replay_training_demo(env, policy_env, profile: dict) -> None:
             actions = demo["actions"]
             for timestep, action in enumerate(actions):
                 obs, *_ = env.step(torch.as_tensor(action, device=policy_env.device)[None])
+                for camera_key, env_camera_key in profile["camera_fields"].items():
+                    video_frames[camera_key].append(
+                        _camera_frame(obs, env_camera_key).copy()
+                    )
                 if timestep % 20 == 0:
                     policy_obs = obs["policy"]
                     live_position = _numpy(policy_obs[state_field])[0]
@@ -260,6 +265,9 @@ def _replay_training_demo(env, policy_env, profile: dict) -> None:
                 _numpy(policy_env.termination_manager.get_term("success")).any()
             )
             log(f"[demo replay {name}] success: {success}")
+            for camera_key, frames in video_frames.items():
+                video_path = output_dir / f"demo_replay_{name}_{camera_key}.mp4"
+                _save_video(frames, video_path, int(profile["fps"]))
     finally:
         handler.close()
 
@@ -489,7 +497,7 @@ def evaluate_profile(profile: dict) -> None:
     results_path = output_dir / "results.csv"
     successes = 0
     try:
-        _replay_training_demo(env, policy_env, profile)
+        _replay_training_demo(env, policy_env, profile, output_dir)
         with results_path.open("w", newline="") as result_file:
             writer = csv.DictWriter(result_file, fieldnames=["episode", "success", "steps"])
             writer.writeheader()
