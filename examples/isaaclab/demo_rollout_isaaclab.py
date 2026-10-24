@@ -359,51 +359,6 @@ def _diagnose_training_loss_and_reconstruction(policy, profile: dict, instructio
             f"single-step t=0.5 normalized recon MAE={recon_mae:.6f}"
         )
     policy.reset()
-    for start in range(0, frame_count, chunk_size):
-        policy_input = {
-            "video": {key: value[start][None, None] for key, value in videos.items()},
-            "state": {key: value[start][None, None] for key, value in states.items()},
-            "language": {policy.modality_configs["language"].modality_keys[0]: [[instruction]]},
-        }
-        action_dict, _ = policy.get_action(policy_input)
-        predicted = np.stack([
-            np.concatenate([action_dict[key][0, offset] for key in profile["action_fields"]])
-            for offset in range(chunk_size)
-        ]).astype(np.float32)
-        target = gt[start:start + chunk_size]
-        if predicted.shape != target.shape:
-            raise ValueError(f"Prediction/GT shapes differ: {predicted.shape} vs {target.shape}")
-        predictions.append(predicted)
-        targets.append(target)
-        pred_std, gt_std = float(predicted.std()), float(target.std())
-        ratio = pred_std / gt_std if gt_std > 1e-12 else float("nan")
-        log(
-            f"[offline demo episode_000000] frames {start:03d}-{start + 15:03d}: "
-            f"MAE={np.abs(predicted - target).mean():.6f}, pred_std={pred_std:.6f}, "
-            f"GT_std={gt_std:.6f}, std_ratio={ratio:.6f}"
-        )
-    predictions, targets = np.concatenate(predictions), np.concatenate(targets)
-    pred_std, gt_std = predictions.std(axis=0), targets.std(axis=0)
-    ratios = np.divide(pred_std, gt_std, out=np.full_like(pred_std, np.nan), where=gt_std > 1e-12)
-    valid_ratios = ratios[np.isfinite(ratios)]
-    global_ratio = predictions.std() / max(float(targets.std()), 1e-12)
-    log(
-        f"[offline demo summary] 128 frames: MAE={np.abs(predictions-targets).mean():.6f}, "
-        f"global std ratio={global_ratio:.6f}, "
-        f"median per-dimension std ratio="
-        f"{np.median(valid_ratios) if valid_ratios.size else float('nan'):.6f}"
-    )
-    csv_path = output_dir / "offline_demo_episode_000000.csv"
-    with csv_path.open("w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["frame", *[f"pred_{i}" for i in range(predictions.shape[1])],
-                         *[f"gt_{i}" for i in range(targets.shape[1])]])
-        for frame, (prediction, target) in enumerate(zip(predictions, targets)):
-            writer.writerow([frame, *prediction.tolist(), *target.tolist()])
-    log(f"Saved frame-level predictions and GT to {csv_path}")
-    policy.reset()
-
-
 def _replay_training_demo(env, policy_env, profile: dict, output_dir: Path) -> None:
     """Replay the first demo from the profile's source HDF5 dataset."""
     import h5py
