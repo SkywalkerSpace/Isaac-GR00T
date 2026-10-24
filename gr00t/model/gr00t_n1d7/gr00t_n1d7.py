@@ -161,7 +161,13 @@ class Gr00tN1d7ActionHead(nn.Module):
                 self.vl_self_attention.eval()
 
     def sample_time(self, batch_size, device, dtype):
-        sample = self.beta_dist.sample([batch_size]).to(device, dtype=dtype)
+        # torch.distributions.Beta uses Dirichlet sampling, which is not
+        # implemented for bfloat16. Sample in the distribution's float32
+        # concentration dtype, then cast to the action tensor dtype.
+        sample = Beta(
+            self.beta_dist.concentration1.float(),
+            self.beta_dist.concentration0.float(),
+        ).sample([batch_size]).to(device=device, dtype=dtype)
         sample = (1 - sample) * self.config.noise_s
         return sample
 
