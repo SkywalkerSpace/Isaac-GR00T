@@ -34,10 +34,10 @@ training:
   output_dir: ./outputs/isaaclab_multi_robot
   experiment_name: isaaclab_multi_robot_n1d7
   start_from_checkpoint: /home/mayuhang/models/GR00T-N1.7-3B
-  global_batch_size: 4
-  gradient_accumulation_steps: 4
+  global_batch_size: 16
+  gradient_accumulation_steps: 2
   num_gpus: 1
-  dataloader_num_workers: 2
+  dataloader_num_workers: 4
   learning_rate: 0.0001
   weight_decay: 0.00001
   warmup_ratio: 0.05
