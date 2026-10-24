@@ -234,6 +234,127 @@ def _diagnose_offline_demo(policy, profile: dict, instruction: str, output_dir: 
     }
     predictions, targets = [], []
     policy.reset()
+
+
+def _predict_flow_velocity(action_head, backbone_output, action_input, normalized_actions, noise, t):
+    """Evaluate the action network once for supplied x_t and continuous t."""
+    action_head.set_frozen_modules_to_eval_mode()
+    vl = backbone_output["backbone_features"]
+    embodiment_id = action_input.embodiment_id
+    state_features = action_head.state_encoder(action_input.state, embodiment_id)
+    xt = (1.0 - t) * noise + t * normalized_actions
+    t_bucket = (t[:, 0, 0] * action_head.num_timestep_buckets).long()
+    action_features = action_head.action_encoder(xt, t_bucket, embodiment_id)
+    if action_head.config.add_pos_embed:
+        pos_ids = torch.arange(action_features.shape[1], device=vl.device)
+        action_features = action_features + action_head.position_embedding(pos_ids).unsqueeze(0)
+    hidden = torch.cat((state_features, action_features), dim=1)
+    if action_head.config.use_alternate_vl_dit:
+        model_output = action_head.model(
+            hidden_states=hidden, encoder_hidden_states=vl,
+            timestep=t_bucket, image_mask=backbone_output.image_mask,
+            backbone_attention_mask=backbone_output.backbone_attention_mask,
+        )
+    else:
+        model_output = action_head.model(
+            hidden_states=hidden, encoder_hidden_states=vl, timestep=t_bucket
+        )
+    pred = action_head.action_decoder(model_output, embodiment_id)
+    return pred[:, -normalized_actions.shape[1]:], xt
+
+
+def _diagnose_training_loss_and_reconstruction(policy, profile: dict, instruction: str) -> None:
+    """Compare eval flow-matching loss, sampled actions, and one-step reconstruction."""
+    from gr00t.data.types import MessageType, VLAStepData
+
+    dataset = Path(profile["lerobot_dataset"])
+    parquet_path = dataset / "data/chunk-000/episode_000000.parquet"
+    modality_path = dataset / "meta/modality.json"
+    metadata = json.loads(modality_path.read_text())
+    table = pd.read_parquet(parquet_path)
+    nframes, horizon = 128, 16
+    if len(table) < nframes:
+        raise ValueError(f"Need {nframes} frames in {parquet_path}, found {len(table)}")
+    states_flat = np.stack(table["observation.state"].iloc[:nframes]).astype(np.float32)
+    actions_flat = np.stack(table["action"].iloc[:nframes]).astype(np.float32)
+    frames = {}
+    for key in policy.modality_configs["video"].modality_keys:
+        path = dataset / f"videos/chunk-000/observation.images.{key}/episode_000000.mp4"
+        decoded = _numpy(get_frames_by_indices(
+            str(path), list(range(nframes)), video_backend="torchcodec"
+        ))
+        if len(decoded) < nframes:
+            raise ValueError(f"{path} has only {len(decoded)} decoded frames")
+        frames[key] = decoded[:nframes]
+
+    state_values = {k: states_flat[:, v["start"]:v["end"]]
+                    for k, v in metadata["state"].items()}
+    action_values = {k: actions_flat[:, v["start"]:v["end"]]
+                     for k, v in metadata["action"].items()}
+    policy.processor.eval()
+    policy.model.eval()
+    action_head = policy.model.action_head
+    time_grid = (0.1, 0.3, 0.5, 0.7, 0.9)
+    for start in range(0, nframes - horizon + 1, horizon):
+        sample = VLAStepData(
+            images={k: [v[start]] for k, v in frames.items()},
+            states={k: v[start] for k, v in state_values.items()},
+            actions={k: v[start:start + horizon] for k, v in action_values.items()},
+            text=instruction,
+            embodiment=policy.embodiment_tag,
+        )
+        processed = policy.processor([{
+            "type": MessageType.EPISODE_STEP.value, "content": sample,
+        }])
+        batch = policy.collate_fn([processed])
+        backbone_inputs, action_inputs = policy.model.prepare_input(batch)
+        # Move and cast with the same contract as Gr00tN1d7.prepare_input.
+        def move(x):
+            return x.to(policy.model.device, dtype=policy.model.dtype) if torch.is_floating_point(x) else x.to(policy.model.device)
+        import tree
+        backbone_inputs = tree.map_structure(move, backbone_inputs)
+        action_inputs = tree.map_structure(move, action_inputs)
+        with torch.inference_mode():
+            backbone_output = policy.model.backbone(backbone_inputs)
+            backbone_output = action_head.process_backbone_output(backbone_output)
+            gt_norm = action_inputs.action
+            mask = action_inputs.action_mask
+            # Fixed noise makes the t-grid comparison repeatable and matches
+            # the training objective's x_t and velocity target definitions.
+            generator = torch.Generator(device=gt_norm.device).manual_seed(1000 + start)
+            noise = torch.randn(gt_norm.shape, dtype=gt_norm.dtype, device=gt_norm.device, generator=generator)
+            losses = []
+            for time in time_grid:
+                t = torch.full((gt_norm.shape[0], 1, 1), time, device=gt_norm.device, dtype=gt_norm.dtype)
+                pred_v, _ = _predict_flow_velocity(action_head, backbone_output, action_inputs, gt_norm, noise, t)
+                target_v = gt_norm - noise
+                loss = (((pred_v - target_v) ** 2) * mask).sum() / (mask.sum() + 1e-6)
+                losses.append(float(loss.float().cpu()))
+
+            # Reuse the rollout policy wrapper so decoding/unnormalization is included.
+            observation = {
+                "video": {k: v[start][None, None] for k, v in frames.items()},
+                "state": {k: v[start][None, None] for k, v in state_values.items()},
+                "language": {policy.language_key: [[instruction]]},
+            }
+            sampled, _ = policy.get_action(observation)
+            sampled_flat = np.stack([
+                np.concatenate([sampled[k][0, j] for k in profile["action_fields"]])
+                for j in range(horizon)
+            ])
+            gt_chunk = actions_flat[start:start + horizon]
+            sample_mae = float(np.mean(np.abs(sampled_flat - gt_chunk)))
+
+            half_t = torch.full((gt_norm.shape[0], 1, 1), 0.5, device=gt_norm.device, dtype=gt_norm.dtype)
+            pred_v, xt = _predict_flow_velocity(action_head, backbone_output, action_inputs, gt_norm, noise, half_t)
+            reconstructed = xt + (1.0 - half_t) * pred_v
+            recon_mae = float((((reconstructed - gt_norm).abs() * mask).sum() / (mask.sum() + 1e-6)).float().cpu())
+        log(
+            f"[train-vs-sample frame {start:03d}] eval flow loss(t={','.join(map(str,time_grid))})="
+            f"{[round(v, 6) for v in losses]}, sampled MAE={sample_mae:.6f}, "
+            f"single-step t=0.5 normalized recon MAE={recon_mae:.6f}"
+        )
+    policy.reset()
     for start in range(0, frame_count, chunk_size):
         policy_input = {
             "video": {key: value[start][None, None] for key, value in videos.items()},
@@ -575,6 +696,7 @@ def evaluate_profile(profile: dict) -> None:
     try:
         if args.offline_demo_diagnosis:
             _diagnose_offline_demo(policy, profile, instruction, output_dir)
+            _diagnose_training_loss_and_reconstruction(policy, profile, instruction)
         _replay_training_demo(env, policy_env, profile, output_dir)
         with results_path.open("w", newline="") as result_file:
             writer = csv.DictWriter(result_file, fieldnames=["episode", "success", "steps"])

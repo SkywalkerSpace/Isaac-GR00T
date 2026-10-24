@@ -12,7 +12,7 @@ model:
   use_percentiles: true
   max_state_dim: 132
   max_action_dim: 132
-  action_horizon: 40
+  action_horizon: 16
   state_history_length: 1
   state_dropout_prob: 0.0
   image_crop_size: [230, 230]
