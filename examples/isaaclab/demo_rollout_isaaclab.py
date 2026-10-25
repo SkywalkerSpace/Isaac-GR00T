@@ -4,6 +4,7 @@
 import argparse
 import csv
 from datetime import datetime, timezone
+import inspect
 import os
 import random
 import sys
@@ -63,7 +64,6 @@ import cv2
 import gymnasium as gym
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 import isaaclab_tasks  # noqa: F401
 import isaaclab_mimic.envs  # noqa: F401 - importing the package registers Mimic Gym IDs
@@ -520,15 +520,8 @@ def _diagnose_training_loss_and_reconstruction(policy, profile: dict, instructio
                 pred_v, _ = _predict_flow_velocity(action_head, backbone_output, action_inputs, gt_norm, noise, t)
                 velocity_stats.append(f"t={time:.1f} {_diagnostic_tensor_stats(pred_v)}")
                 target_v = gt_norm - noise
-                mse = F.mse_loss(pred_v, target_v, reduction="none") * mask
-                loss_by_valid = mse.sum() / mask.sum()
-                loss_by_numel = mse.sum() / mask.numel()
-                losses.append(float(loss_by_valid.float().cpu()))
-                log(
-                    f"[velocity loss] t={time:.1f} "
-                    f"by_valid={loss_by_valid.float().item():.6g} "
-                    f"by_numel={loss_by_numel.float().item():.6g}"
-                )
+                loss = (((pred_v - target_v) ** 2) * mask).sum() / (mask.sum() + 1e-6)
+                losses.append(float(loss.float().cpu()))
 
             # Reuse the rollout policy wrapper so decoding/unnormalization is included.
             observation = {
@@ -704,6 +697,19 @@ def _diagnose_train_eval_batch_loss(
     model = policy.model
     action_head = model.action_head
     mode_losses = {"train": [], "eval": []}
+    log(f"[training-dataloader forward] signature={inspect.signature(model.forward)}")
+
+    def _to_device(value, device):
+        if torch.is_tensor(value):
+            return value.to(device)
+        if isinstance(value, dict) or hasattr(value, "items"):
+            # Rebuild mapping-like BatchFeature objects as plain dictionaries.
+            return {key: _to_device(item, device) for key, item in value.items()}
+        if isinstance(value, tuple):
+            return tuple(_to_device(item, device) for item in value)
+        if isinstance(value, list):
+            return [_to_device(item, device) for item in value]
+        return value
     rng_states = []
     for _ in range(min(diagnostic_batch_count, len(loader))):
         rng_states.append((
@@ -729,17 +735,10 @@ def _diagnose_train_eval_batch_loss(
                 torch.random.set_rng_state(cpu_rng_state)
                 if cuda_rng_state is not None:
                     torch.cuda.set_rng_state_all(cuda_rng_state)
-                model_inputs = batch["inputs"]
-                backbone_inputs, action_inputs = model.prepare_input(model_inputs)
-                hooks, first_nonfinite = _install_nonfinite_hooks(
-                    model.backbone, f"training-dataloader mode={mode} batch={batch_index}"
-                )
-                try:
-                    backbone_output = model.backbone(backbone_inputs)
-                finally:
-                    for handle in hooks:
-                        handle.remove()
-                result = action_head(backbone_output, action_inputs)
+                # Trainer passes the collator output as kwargs. The collator
+                # returns {"inputs": {...}}, matching forward(inputs: dict).
+                batch = _to_device(batch, model.device)
+                result = model(**batch)
                 mode_losses[mode].append(float(result["loss"].float().cpu()))
 
     for mode, values in mode_losses.items():
@@ -749,7 +748,7 @@ def _diagnose_train_eval_batch_loss(
                 f"(batch_size={batch_size})"
             )
         log(
-            f"[training-dataloader masked-loss] mode={mode} "
+            f"[training-dataloader model-loss] mode={mode} "
             f"batches={len(values)} batch_size={batch_size} "
             f"mean_loss={np.mean(values):.6f} std={np.std(values):.6f}"
         )
