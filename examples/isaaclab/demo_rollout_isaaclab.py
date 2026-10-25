@@ -63,6 +63,7 @@ import cv2
 import gymnasium as gym
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 import isaaclab_tasks  # noqa: F401
 import isaaclab_mimic.envs  # noqa: F401 - importing the package registers Mimic Gym IDs
@@ -519,8 +520,15 @@ def _diagnose_training_loss_and_reconstruction(policy, profile: dict, instructio
                 pred_v, _ = _predict_flow_velocity(action_head, backbone_output, action_inputs, gt_norm, noise, t)
                 velocity_stats.append(f"t={time:.1f} {_diagnostic_tensor_stats(pred_v)}")
                 target_v = gt_norm - noise
-                loss = (((pred_v - target_v) ** 2) * mask).sum() / (mask.sum() + 1e-6)
-                losses.append(float(loss.float().cpu()))
+                mse = F.mse_loss(pred_v, target_v, reduction="none") * mask
+                loss_by_valid = mse.sum() / mask.sum()
+                loss_by_numel = mse.sum() / mask.numel()
+                losses.append(float(loss_by_valid.float().cpu()))
+                log(
+                    f"[velocity loss] t={time:.1f} "
+                    f"by_valid={loss_by_valid.float().item():.6g} "
+                    f"by_numel={loss_by_numel.float().item():.6g}"
+                )
 
             # Reuse the rollout policy wrapper so decoding/unnormalization is included.
             observation = {
