@@ -697,7 +697,7 @@ def _diagnose_train_eval_batch_loss(
     action_head = model.action_head
     mode_losses = {"train": [], "eval": []}
     rng_states = []
-    for _ in range(min(batch_count, len(loader))):
+    for _ in range(min(diagnostic_batch_count, len(loader))):
         rng_states.append((
             torch.random.get_rng_state(),
             torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
