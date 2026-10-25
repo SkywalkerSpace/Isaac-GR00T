@@ -738,7 +738,13 @@ def _diagnose_train_eval_batch_loss(
                 # Trainer passes the collator output as kwargs. The collator
                 # returns {"inputs": {...}}, matching forward(inputs: dict).
                 batch = _to_device(batch, model.device)
-                result = model(**batch)
+                if mode == "eval":
+                    model.action_head.float()  # Restore fp32 weights.
+                    model.eval()
+                    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+                        result = model(**batch)
+                else:
+                    result = model(**batch)
                 mode_losses[mode].append(float(result["loss"].float().cpu()))
 
     for mode, values in mode_losses.items():
