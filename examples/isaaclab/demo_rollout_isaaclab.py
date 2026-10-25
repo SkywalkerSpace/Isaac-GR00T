@@ -34,6 +34,8 @@ parser.add_argument("--diagnosis-batches", type=int, default=200,
                     help="Maximum training-dataloader batches for train/eval loss diagnosis")
 parser.add_argument("--diagnosis-batch-size", type=int, default=1,
                     help="Batch size for train/eval loss diagnosis (default: training global batch size 1)")
+parser.add_argument("--diagnosis-episodes", type=int, default=256,
+                    help="Minimum distinct episodes sampled for train/eval loss diagnosis (must be >=200)")
 parser.add_argument("--language", default=None)
 parser.add_argument("--video-dir", type=Path, default=Path("./outputs/isaaclab_rollout"))
 parser.add_argument(
@@ -46,6 +48,8 @@ if args.action_steps < 1:
     parser.error("--action-steps must be at least 1")
 if args.diagnosis_batches < 1 or args.diagnosis_batch_size < 1:
     parser.error("--diagnosis-batches and --diagnosis-batch-size must be at least 1")
+if args.diagnosis_episodes < 200:
+    parser.error("--diagnosis-episodes must be at least 200")
 
 
 def log(message: str) -> None:
@@ -417,6 +421,15 @@ def _diagnostic_tensor_stats(value) -> str:
     )
 
 
+def _parameter_dtype_summary(module) -> dict[str, int]:
+    """Count parameter elements by dtype for checkpoint precision auditing."""
+    summary = {}
+    for parameter in module.parameters():
+        key = str(parameter.dtype)
+        summary[key] = summary.get(key, 0) + parameter.numel()
+    return summary
+
+
 def _diagnose_training_loss_and_reconstruction(policy, profile: dict, instruction: str) -> None:
     """Compare eval flow-matching loss, sampled actions, and one-step reconstruction."""
     from gr00t.data.types import MessageType, VLAStepData
@@ -539,9 +552,10 @@ def _diagnose_training_loss_and_reconstruction(policy, profile: dict, instructio
 
 
 def _diagnose_train_eval_batch_loss(
-    policy, profile: dict, batch_count: int = 200, batch_size: int = 1
+    policy, profile: dict, batch_count: int = 200, batch_size: int = 1,
+    episode_count: int = 256,
 ) -> None:
-    """Compare train/eval loss on a dataset-wide sample via the training data path."""
+    """Compare masked train/eval loss on random windows from many episodes."""
     from torch.utils.data import DataLoader
 
     from gr00t.data.dataset.sharded_single_step_dataset import ShardedSingleStepDataset
@@ -593,12 +607,43 @@ def _diagnose_train_eval_batch_loss(
         log(f"[training statistics check] override={override_statistics} "
             f"checkpoint-vs-training-dataset max_abs_delta={stats_delta:.3g}")
     train_dataset.set_processor(policy.processor)
-    # Training shards cover the valid windows from every episode. Uniformly
-    # sample that same population instead of treating episode zero as the
-    # training-set average.
+    model_path = Path(args.model_path).expanduser().resolve()
+    training_step = None
+    if model_path.name.startswith("checkpoint-"):
+        try:
+            training_step = int(model_path.name.split("-", 1)[1])
+        except ValueError:
+            pass
+    state_path = model_path / "trainer_state.json"
+    if training_step is None and state_path.is_file():
+        try:
+            training_step = json.loads(state_path.read_text()).get("global_step")
+        except (OSError, json.JSONDecodeError):
+            pass
+    log(f"[checkpoint audit] model_path={model_path} trainer_global_step={training_step} "
+        f"loaded_parameter_dtypes={getattr(policy, 'loaded_parameter_dtypes', 'unavailable')} "
+        f"runtime_parameter_dtypes={_parameter_dtype_summary(policy.model)} "
+        f"backbone_dtype={next(policy.model.backbone.parameters()).dtype} "
+        f"action_head_dtype={next(policy.model.action_head.parameters()).dtype}")
+
+    # Draw at least one random valid window from each of >=200 distinct
+    # episodes, then fill any remaining requested batches from the full set of
+    # valid windows. Train/eval runs reuse this exact window list.
     episode_lengths = [
         train_dataset.get_effective_episode_length(idx)
         for idx in range(len(train_dataset.episode_loader.episodes_metadata))
+    ]
+    eligible_episodes = [idx for idx, length in enumerate(episode_lengths) if length > 0]
+    if len(eligible_episodes) < 200:
+        raise ValueError(
+            f"Need at least 200 episodes with valid action windows; found {len(eligible_episodes)}"
+        )
+    episode_count = min(episode_count, len(eligible_episodes))
+    rng = np.random.default_rng(seed)
+    chosen_episodes = rng.choice(eligible_episodes, size=episode_count, replace=False)
+    selected_refs = [
+        (int(episode_index), int(rng.integers(episode_lengths[episode_index])))
+        for episode_index in chosen_episodes
     ]
     window_refs = [
         (episode_index, step_index)
@@ -607,12 +652,27 @@ def _diagnose_train_eval_batch_loss(
     ]
     if not window_refs:
         raise ValueError(f"{dataset_path} has no valid action windows")
-    sample_count = min(batch_count * batch_size, len(window_refs))
-    rng = np.random.default_rng(seed)
-    selected_refs = [window_refs[i] for i in rng.choice(
-        len(window_refs), size=sample_count, replace=False
-    )]
+    requested_samples = max(batch_count * batch_size, episode_count)
+    selected_set = set(selected_refs)
+    remaining_refs = [ref for ref in window_refs if ref not in selected_set]
+    extra_count = min(max(0, requested_samples - len(selected_refs)), len(remaining_refs))
+    if extra_count:
+        extra_indices = rng.choice(len(remaining_refs), size=extra_count, replace=False)
+        selected_refs.extend(remaining_refs[i] for i in extra_indices)
     selected_refs.sort()
+    sample_count = (len(selected_refs) // batch_size) * batch_size
+    selected_refs = selected_refs[:sample_count]
+    diagnostic_batch_count = min(batch_count, sample_count // batch_size)
+    if diagnostic_batch_count * batch_size < episode_count:
+        diagnostic_batch_count = (episode_count + batch_size - 1) // batch_size
+        diagnostic_batch_count = min(diagnostic_batch_count, sample_count // batch_size)
+    evaluated_episode_count = len({ep for ep, _ in selected_refs[:diagnostic_batch_count * batch_size]})
+    if evaluated_episode_count < 200:
+        raise ValueError(
+            f"Selected diagnostic batches cover only {evaluated_episode_count} episodes; expected >=200"
+        )
+    log(f"[training-dataloader sample] distinct_episodes={evaluated_episode_count} "
+        f"windows={diagnostic_batch_count * batch_size} dataset_episodes={len(eligible_episodes)}")
 
     class EpisodeWindows(torch.utils.data.Dataset):
         def __init__(self):
@@ -653,7 +713,7 @@ def _diagnose_train_eval_batch_loss(
             else:
                 policy.processor.eval()
             for batch_index, batch in enumerate(loader):
-                if batch_index >= batch_count:
+                if batch_index >= diagnostic_batch_count:
                     break
                 # Reuse identical noise and Beta-distributed t per batch in
                 # both modes so the comparison isolates train/eval behavior.
@@ -681,7 +741,7 @@ def _diagnose_train_eval_batch_loss(
                 f"(batch_size={batch_size})"
             )
         log(
-            f"[training-dataloader dataset-sample] mode={mode} "
+            f"[training-dataloader masked-loss] mode={mode} "
             f"batches={len(values)} batch_size={batch_size} "
             f"mean_loss={np.mean(values):.6f} std={np.std(values):.6f}"
         )
@@ -1012,6 +1072,7 @@ def evaluate_profile(profile: dict) -> None:
                 policy, profile,
                 batch_count=args.diagnosis_batches,
                 batch_size=args.diagnosis_batch_size,
+                episode_count=args.diagnosis_episodes,
             )
             log("Offline demo diagnostics complete; skipping interactive episode rollouts")
             policy.reset()

@@ -20,6 +20,7 @@ This module provides the core policy classes for running Gr00t models:
 - Gr00tSimPolicyWrapper: Wrapper for compatibility with existing Gr00t simulation environments
 """
 
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +101,10 @@ class Gr00tPolicy(BasePolicy):
         # Nested base-model loading handles its own device context in the
         # backbone constructor.
         model = AutoModel.from_pretrained(model_dir)
+        loaded_parameter_dtypes = Counter()
+        for parameter in model.parameters():
+            loaded_parameter_dtypes[str(parameter.dtype)] += parameter.numel()
+        self.loaded_parameter_dtypes = dict(loaded_parameter_dtypes)
         model.eval()  # Set model to evaluation mode
         model.to(device=device, dtype=torch.bfloat16)
         self.model = model
