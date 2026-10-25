@@ -262,7 +262,10 @@ def _diagnose_offline_demo(policy, profile: dict, instruction: str, output_dir: 
     if not has_other_episode:
         alternate_images = {key: value[chunk_size] for key, value in videos.items()}
     tag = policy.embodiment_tag.value
-    processor_action_stats = policy.processor.statistics[tag]["action"]
+    # The processor's public statistics mirror is only populated by
+    # set_statistics(); from_pretrained loads the active normalization data
+    # into StateActionProcessor directly.
+    processor_action_stats = policy.processor.state_action_processor.statistics[tag]["action"]
     action_keys = policy.modality_configs["action"].modality_keys
     dataset_mean = np.concatenate([
         np.asarray(processor_action_stats[key]["mean"], dtype=np.float32).reshape(-1)
@@ -575,7 +578,7 @@ def _diagnose_train_eval_batch_loss(
     # Use the training processor, collator, and dataset-statistics merge.
     dataset_statistics = train_dataset.get_dataset_statistics()
     override_statistics = bool(data_config.get("override_pretraining_statistics", True))
-    checkpoint_statistics = policy.processor.statistics.get(tag)
+    checkpoint_statistics = policy.processor.state_action_processor.statistics.get(tag)
     policy.processor.set_statistics(
         {tag: dataset_statistics},
         override=override_statistics,
@@ -585,7 +588,7 @@ def _diagnose_train_eval_batch_loss(
         policy.processor.set_statistics({tag: train_dataset_statistics}, override=True)
     if checkpoint_statistics is not None:
         stats_delta = _max_statistics_difference(
-            checkpoint_statistics, policy.processor.statistics[tag]
+            checkpoint_statistics, policy.processor.state_action_processor.statistics[tag]
         )
         log(f"[training statistics check] override={override_statistics} "
             f"checkpoint-vs-training-dataset max_abs_delta={stats_delta:.3g}")
