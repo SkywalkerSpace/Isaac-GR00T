@@ -261,16 +261,27 @@ def _diagnose_offline_demo(policy, profile: dict, instruction: str, output_dir: 
                 break
     if not has_other_episode:
         alternate_images = {key: value[chunk_size] for key, value in videos.items()}
+    tag = policy.embodiment_tag.value
+    processor_action_stats = policy.processor.statistics[tag]["action"]
+    action_keys = policy.modality_configs["action"].modality_keys
+    dataset_mean = np.concatenate([
+        np.asarray(processor_action_stats[key]["mean"], dtype=np.float32).reshape(-1)
+        for key in action_keys
+    ])
+    if dataset_mean.shape != (gt.shape[1],):
+        raise ValueError(
+            f"Checkpoint processor action mean has shape {dataset_mean.shape}; "
+            f"recorded actions have shape {(gt.shape[1],)}"
+        )
+    mean_source = "checkpoint processor statistics.json"
     try:
-        stats = json.loads((dataset / "meta/stats.json").read_text())
-        action_mean = np.asarray(stats["action"]["mean"], dtype=np.float32).reshape(-1)
-        if action_mean.shape != (gt.shape[1],):
-            raise ValueError("action mean dimension does not match recorded actions")
-        dataset_mean = action_mean
-        mean_source = "meta/stats.json"
+        raw_dataset_stats = json.loads((dataset / "meta/stats.json").read_text())
+        dataset_mean_check = np.asarray(raw_dataset_stats["action"]["mean"], dtype=np.float32)
+        if dataset_mean_check.shape == dataset_mean.shape:
+            log(f"[offline statistics check] checkpoint-vs-dataset action mean "
+                f"max_abs_delta={np.max(np.abs(dataset_mean - dataset_mean_check)):.3g}")
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-        dataset_mean = gt.mean(axis=0)
-        mean_source = "episode_000000 fallback"
+        pass
     predictions, targets = [], []
     policy.reset()
     policy.model.eval()
@@ -527,7 +538,7 @@ def _diagnose_training_loss_and_reconstruction(policy, profile: dict, instructio
 def _diagnose_train_eval_batch_loss(
     policy, profile: dict, batch_count: int = 200, batch_size: int = 1
 ) -> None:
-    """Compare train/eval mode loss on episode zero via the training dataset path."""
+    """Compare train/eval loss on a dataset-wide sample via the training data path."""
     from torch.utils.data import DataLoader
 
     from gr00t.data.dataset.sharded_single_step_dataset import ShardedSingleStepDataset
@@ -564,6 +575,7 @@ def _diagnose_train_eval_batch_loss(
     # Use the training processor, collator, and dataset-statistics merge.
     dataset_statistics = train_dataset.get_dataset_statistics()
     override_statistics = bool(data_config.get("override_pretraining_statistics", True))
+    checkpoint_statistics = policy.processor.statistics.get(tag)
     policy.processor.set_statistics(
         {tag: dataset_statistics},
         override=override_statistics,
@@ -571,41 +583,48 @@ def _diagnose_train_eval_batch_loss(
     if not override_statistics:
         train_dataset_statistics = policy.processor.statistics[tag]
         policy.processor.set_statistics({tag: train_dataset_statistics}, override=True)
+    if checkpoint_statistics is not None:
+        stats_delta = _max_statistics_difference(
+            checkpoint_statistics, policy.processor.statistics[tag]
+        )
+        log(f"[training statistics check] override={override_statistics} "
+            f"checkpoint-vs-training-dataset max_abs_delta={stats_delta:.3g}")
     train_dataset.set_processor(policy.processor)
-    episode_index = next(
-        (idx for idx, meta in enumerate(train_dataset.episode_loader.episodes_metadata)
-         if int(meta["episode_index"]) == 0),
-        None,
-    )
-    if episode_index is None:
-        raise ValueError(f"{dataset_path} has no metadata entry for episode_000000")
-    episode_data = train_dataset.episode_loader[episode_index]
-    episode_length = train_dataset.get_effective_episode_length(episode_index)
-    if episode_length == 0:
-        raise ValueError(f"Episode 0 in {dataset_path} has no valid action windows")
-
-    # Training partitions each episode into 1 / episode_sampling_rate splits
-    # and samples each partition without replacement.
-    num_splits = max(1, int(1 / episode_sampling_rate))
-    split_indices = np.array_split(np.arange(episode_length), num_splits)
-    py_rng = random.Random(seed)
-    sampled_indices = []
-    for split in split_indices:
-        shuffled = split.tolist()
-        py_rng.shuffle(shuffled)
-        sampled_indices.extend(shuffled)
-        if len(sampled_indices) >= batch_count * batch_size:
-            break
-    window_indices = np.asarray(sampled_indices[: batch_count * batch_size], dtype=np.int64)
-    window_indices.sort()
-    sample_count = len(window_indices)
+    # Training shards cover the valid windows from every episode. Uniformly
+    # sample that same population instead of treating episode zero as the
+    # training-set average.
+    episode_lengths = [
+        train_dataset.get_effective_episode_length(idx)
+        for idx in range(len(train_dataset.episode_loader.episodes_metadata))
+    ]
+    window_refs = [
+        (episode_index, step_index)
+        for episode_index, length in enumerate(episode_lengths)
+        for step_index in range(length)
+    ]
+    if not window_refs:
+        raise ValueError(f"{dataset_path} has no valid action windows")
+    sample_count = min(batch_count * batch_size, len(window_refs))
+    rng = np.random.default_rng(seed)
+    selected_refs = [window_refs[i] for i in rng.choice(
+        len(window_refs), size=sample_count, replace=False
+    )]
+    selected_refs.sort()
 
     class EpisodeWindows(torch.utils.data.Dataset):
+        def __init__(self):
+            self.cached_episode_index = None
+            self.cached_episode_data = None
+
         def __len__(self):
             return sample_count
 
         def __getitem__(self, index):
-            return train_dataset.get_datapoint(episode_data, int(window_indices[index]))
+            episode_index, step_index = selected_refs[index]
+            if episode_index != self.cached_episode_index:
+                self.cached_episode_data = train_dataset.episode_loader[episode_index]
+                self.cached_episode_index = episode_index
+            return train_dataset.get_datapoint(self.cached_episode_data, step_index)
 
     loader = DataLoader(
         EpisodeWindows(), batch_size=batch_size, shuffle=False,
@@ -626,6 +645,7 @@ def _diagnose_train_eval_batch_loss(
     with torch.inference_mode():
         for mode in ("train", "eval"):
             model.train(mode == "train")
+            policy.processor.train(mode == "train")
             for batch_index, batch in enumerate(loader):
                 if batch_index >= batch_count:
                     break
@@ -651,14 +671,40 @@ def _diagnose_train_eval_batch_loss(
     for mode, values in mode_losses.items():
         if not values:
             raise ValueError(
-                f"No complete batches available for episode_000000 (batch_size={batch_size})"
+                f"No complete diagnostic batches available for {dataset_path} "
+                f"(batch_size={batch_size})"
             )
         log(
-            f"[training-dataloader episode_000000] mode={mode} "
+            f"[training-dataloader dataset-sample] mode={mode} "
             f"batches={len(values)} batch_size={batch_size} "
             f"mean_loss={np.mean(values):.6f} std={np.std(values):.6f}"
         )
     model.eval()
+    policy.processor.eval()
+
+
+def _max_statistics_difference(left: dict, right: dict) -> float:
+    """Return the largest elementwise difference among matching statistic arrays."""
+    differences = []
+    for key, left_value in left.items():
+        if key not in right:
+            continue
+        right_value = right[key]
+        if isinstance(left_value, dict) and isinstance(right_value, dict):
+            delta = _max_statistics_difference(left_value, right_value)
+            if np.isfinite(delta):
+                differences.append(delta)
+            continue
+        try:
+            left_array = np.asarray(left_value, dtype=np.float64)
+            right_array = np.asarray(right_value, dtype=np.float64)
+        except (TypeError, ValueError):
+            continue
+        if left_array.shape == right_array.shape and left_array.size:
+            differences.append(float(np.max(np.abs(left_array - right_array))))
+    return max(differences, default=float("nan"))
+
+
 def _replay_training_demo(env, policy_env, profile: dict, output_dir: Path) -> None:
     """Replay the first demo from the profile's source HDF5 dataset."""
     import h5py
