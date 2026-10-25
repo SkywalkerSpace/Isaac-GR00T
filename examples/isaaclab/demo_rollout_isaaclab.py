@@ -648,7 +648,10 @@ def _diagnose_train_eval_batch_loss(
     with torch.inference_mode():
         for mode in ("train", "eval"):
             model.train(mode == "train")
-            policy.processor.train(mode == "train")
+            if mode == "train":
+                policy.processor.train()
+            else:
+                policy.processor.eval()
             for batch_index, batch in enumerate(loader):
                 if batch_index >= batch_count:
                     break
