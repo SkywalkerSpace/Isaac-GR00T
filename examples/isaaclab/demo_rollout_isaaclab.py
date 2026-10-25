@@ -741,11 +741,31 @@ def _diagnose_train_eval_batch_loss(
                 if mode == "eval":
                     model.action_head.float()  # Restore fp32 weights.
                     model.eval()
-                    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+                    with torch.no_grad(), torch.autocast(
+                        "cuda", dtype=torch.bfloat16, enabled=torch.device(model.device).type == "cuda"
+                    ):
                         result = model(**batch)
                 else:
                     result = model(**batch)
-                mode_losses[mode].append(float(result["loss"].float().cpu()))
+                loss_value = result["loss"]
+                if not torch.isfinite(loss_value).all():
+                    inputs = batch.get("inputs", batch)
+                    for key, value in inputs.items():
+                        if torch.is_tensor(value) and torch.is_floating_point(value):
+                            log(f"[nonfinite batch] mode={mode} batch={batch_index} "
+                                f"{key}: {_diagnostic_tensor_stats(value)} dtype={value.dtype}")
+                    for key in ("action_mask", "action", "state", "embodiment_id"):
+                        value = result.get(key)
+                        if value is not None:
+                            log(f"[nonfinite output] mode={mode} batch={batch_index} "
+                                f"{key}: {_diagnostic_tensor_stats(value)}")
+                    log(f"[nonfinite loss] mode={mode} batch={batch_index} "
+                        f"{_diagnostic_tensor_stats(loss_value)}")
+                    raise FloatingPointError(
+                        f"Non-finite {mode} loss on diagnostic batch {batch_index}; "
+                        "see preceding batch/output statistics"
+                    )
+                mode_losses[mode].append(float(loss_value.float().cpu()))
 
     for mode, values in mode_losses.items():
         if not values:

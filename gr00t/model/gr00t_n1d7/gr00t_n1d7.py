@@ -273,8 +273,12 @@ class Gr00tN1d7ActionHead(nn.Module):
 
         # Slice out only the action portion of pred and target.
         action_mask = action_input.action_mask
-        action_loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
-        loss = action_loss.sum() / (action_mask.sum() + 1e-6)
+        # Accumulate the masked objective in fp32. In bf16, summing a long
+        # action horizon can overflow or lose enough precision to destabilize
+        # the denominator even when each per-element loss is finite.
+        action_loss = F.mse_loss(pred_actions.float(), velocity.float(), reduction="none")
+        action_loss = action_loss * action_mask.float()
+        loss = action_loss.sum() / (action_mask.float().sum() + 1e-6)
 
         return {
             "loss": loss,
