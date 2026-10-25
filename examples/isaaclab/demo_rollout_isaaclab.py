@@ -242,8 +242,125 @@ def _diagnose_offline_demo(policy, profile: dict, instruction: str, output_dir: 
         key: flat_state[:, value["start"]:value["end"]]
         for key, value in metadata["state"].items()
     }
+    alternate_images = {}
+    other_episode = dataset / "data/chunk-000/episode_000001.parquet"
+    has_other_episode = other_episode.is_file()
+    if has_other_episode:
+        for key in policy.modality_configs["video"].modality_keys:
+            path = dataset / f"videos/chunk-000/observation.images.{key}/episode_000001.mp4"
+            if not path.is_file():
+                has_other_episode = False
+                break
+            decoded = _numpy(get_frames_by_indices(
+                str(path), [0], video_backend="torchcodec"
+            ))
+            if len(decoded):
+                alternate_images[key] = decoded[0]
+            else:
+                has_other_episode = False
+                break
+    if not has_other_episode:
+        alternate_images = {key: value[chunk_size] for key, value in videos.items()}
+    try:
+        stats = json.loads((dataset / "meta/stats.json").read_text())
+        action_mean = np.asarray(stats["action"]["mean"], dtype=np.float32).reshape(-1)
+        if action_mean.shape != (gt.shape[1],):
+            raise ValueError("action mean dimension does not match recorded actions")
+        dataset_mean = action_mean
+        mean_source = "meta/stats.json"
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        dataset_mean = gt.mean(axis=0)
+        mean_source = "episode_000000 fallback"
     predictions, targets = [], []
     policy.reset()
+    policy.model.eval()
+    action_fields = profile["action_fields"]
+    image_keys = list(videos)
+    state_keys = list(states)
+
+    def observation_at(index, image_index=None, state_index=None):
+        image_index = index if image_index is None else image_index
+        state_index = index if state_index is None else state_index
+        return {
+            "video": {k: videos[k][image_index][None, None] for k in image_keys},
+            "state": {k: states[k][state_index][None, None] for k in state_keys},
+            "language": {policy.language_key: [[instruction]]},
+        }
+
+    abs_errors, base_mean_errors, base_copy_errors = [], [], []
+    image_sensitivities, state_sensitivities = [], []
+    for start in range(0, frame_count - chunk_size + 1, chunk_size):
+        end = start + chunk_size
+        pred, _ = policy.get_action(observation_at(start))
+        pred_flat = np.stack([
+            np.concatenate([_numpy(pred[k])[0, j].reshape(-1) for k in action_fields])
+            for j in range(min(chunk_size, len(next(iter(pred.values()))[0])))
+        ]).astype(np.float32)
+        target = gt[start:end]
+        if len(pred_flat) != len(target):
+            raise ValueError(f"Policy returned {len(pred_flat)} actions for a {len(target)}-step chunk")
+        predictions.append(pred_flat)
+        targets.append(target)
+        abs_errors.append(np.abs(pred_flat - target).mean())
+        base_mean_errors.append(np.abs(dataset_mean - target).mean())
+        base_copy_errors.append(
+            np.abs(flat_state[start][None, :] - target).mean()
+            if flat_state.shape[1] == target.shape[1] else np.nan
+        )
+
+        # Keep the queried state fixed while changing the image, then keep the
+        # image fixed while changing the state. Use another recorded frame as
+        # a deterministic substitute when only one episode is available.
+        alternate = (start + chunk_size) % frame_count
+        image_swap_input = observation_at(start)
+        image_swap_input["video"] = {
+            key: alternate_images[key][None, None] for key in image_keys
+        }
+        pred_img, _ = policy.get_action(image_swap_input)
+        pred_state, _ = policy.get_action(observation_at(start, state_index=alternate))
+        img_flat = np.concatenate([_numpy(pred_img[k])[0, 0].reshape(-1) for k in action_fields])
+        state_flat = np.concatenate([_numpy(pred_state[k])[0, 0].reshape(-1) for k in action_fields])
+        real_first = pred_flat[0]
+        denom = max(float(np.abs(real_first - target[0]).mean()), 1e-8)
+        image_sensitivities.append(float(np.abs(real_first - img_flat).mean() / denom))
+        state_sensitivities.append(float(np.abs(real_first - state_flat).mean() / denom))
+
+    model_mae = float(np.mean(abs_errors))
+    copy_mae = np.nanmean(base_copy_errors) if np.isfinite(base_copy_errors).any() else float("nan")
+    log(f"[offline open-loop episode_000000] chunks={len(abs_errors)} model_MAE={model_mae:.6f} "
+        f"dataset-mean_MAE={np.mean(base_mean_errors):.6f} copy-state_MAE={copy_mae:.6f}")
+    log(f"[input sensitivity] image={np.mean(image_sensitivities):.4f} "
+        f"state={np.mean(state_sensitivities):.4f} "
+        f"(prediction change / real-prediction MAE; image source={'episode_000001' if has_other_episode else 'alternate frame fallback'})")
+    log(f"[offline baselines] action mean source={mean_source}")
+    policy.reset()
+
+
+def _install_nonfinite_hooks(module, label: str):
+    """Log the first module output containing NaN/Inf during one diagnostic pass."""
+    handles = []
+    reported = {"value": False}
+
+    def hook(name):
+        def inspect(_module, _inputs, output):
+            if reported["value"]:
+                return
+            values = output.values() if isinstance(output, dict) else (output,)
+            for value in values:
+                if isinstance(value, (tuple, list)):
+                    values2 = value
+                else:
+                    values2 = (value,)
+                for tensor in values2:
+                    if torch.is_tensor(tensor) and torch.is_floating_point(tensor) and not torch.isfinite(tensor).all():
+                        log(f"[nonfinite hook] {label}.{name or '<root>'}: {_diagnostic_tensor_stats(tensor)}")
+                        reported["value"] = True
+                        return
+        return inspect
+
+    for name, child in module.named_modules():
+        handles.append(child.register_forward_hook(hook(name)))
+    return handles, reported
 
 
 def _predict_flow_velocity(action_head, backbone_output, action_input, normalized_actions, noise, t):
@@ -317,6 +434,8 @@ def _diagnose_training_loss_and_reconstruction(policy, profile: dict, instructio
     policy.processor.eval()
     policy.model.eval()
     action_head = policy.model.action_head
+    log(f"[diagnostic dtype] model={policy.model.dtype}; backbone="
+        f"{next(policy.model.backbone.parameters()).dtype}; device={policy.model.device}")
     time_grid = (0.1, 0.3, 0.5, 0.7, 0.9)
     for start in range(0, nframes - horizon + 1, horizon):
         sample = VLAStepData(
@@ -341,8 +460,20 @@ def _diagnose_training_loss_and_reconstruction(policy, profile: dict, instructio
         import tree
         backbone_inputs = tree.map_structure(move, backbone_inputs)
         action_inputs = tree.map_structure(move, action_inputs)
+        if start == 0:
+            for key in ("pixel_values", "attention_mask", "image_grid_thw", "mm_token_type_ids"):
+                value = backbone_inputs.get(key)
+                if value is not None:
+                    log(f"[backbone input] {key}: {_diagnostic_tensor_stats(value)} dtype={value.dtype}")
         with torch.inference_mode():
-            backbone_output = policy.model.backbone(backbone_inputs)
+            hooks, first_nonfinite = _install_nonfinite_hooks(
+                policy.model.backbone, f"training-reconstruction frame={start}"
+            )
+            try:
+                backbone_output = policy.model.backbone(backbone_inputs)
+            finally:
+                for handle in hooks:
+                    handle.remove()
             backbone_output = action_head.process_backbone_output(backbone_output)
             gt_norm = action_inputs.action
             mask = action_inputs.action_mask
@@ -506,7 +637,14 @@ def _diagnose_train_eval_batch_loss(
                     torch.cuda.set_rng_state_all(cuda_rng_state)
                 model_inputs = batch["inputs"]
                 backbone_inputs, action_inputs = model.prepare_input(model_inputs)
-                backbone_output = model.backbone(backbone_inputs)
+                hooks, first_nonfinite = _install_nonfinite_hooks(
+                    model.backbone, f"training-dataloader mode={mode} batch={batch_index}"
+                )
+                try:
+                    backbone_output = model.backbone(backbone_inputs)
+                finally:
+                    for handle in hooks:
+                        handle.remove()
                 result = action_head(backbone_output, action_inputs)
                 mode_losses[mode].append(float(result["loss"].float().cpu()))
 
