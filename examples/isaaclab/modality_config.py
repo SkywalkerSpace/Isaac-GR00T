@@ -15,7 +15,11 @@ def build_modality_config(profile: dict) -> dict[str, ModalityConfig]:
     action_keys = list(profile["action_fields"])
     return {
         "video": ModalityConfig(delta_indices=[0], modality_keys=video_keys),
-        "state": ModalityConfig(delta_indices=[0], modality_keys=state_keys),
+        "state": ModalityConfig(
+            delta_indices=[0],
+            modality_keys=state_keys,
+            sin_cos_embedding_keys=profile.get("state_sin_cos_embedding_keys", []),
+        ),
         "action": ModalityConfig(
             delta_indices=list(range(int(profile["action_horizon"]))),
             modality_keys=action_keys,

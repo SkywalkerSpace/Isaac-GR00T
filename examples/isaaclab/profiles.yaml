@@ -18,19 +18,24 @@ profiles:
     require_success: true
     mix_ratio: 1.0
     action_fields:
-      arm_left: [0, 7]
-      arm_right: [7, 14]
-      # The environment action packs finger joints by joint class, not by hand:
-      # left/right proximal, left/right intermediate, then both thumb distal.
-      hand_left_proximal: [14, 19]
-      hand_right_proximal: [19, 24]
-      hand_left_intermediate: [24, 29]
-      hand_right_intermediate: [29, 34]
-      hand_thumb_distal: [34, 36]
+      # Indices follow the original 36-D environment action order. The policy
+      # groups each hand's joints together; rollout scatters them back before
+      # calling env.step().
+      left_arm: [0, 1, 2, 3, 4, 5, 6]
+      right_arm: [7, 8, 9, 10, 11, 12, 13]
+      left_hand: [14, 15, 16, 17, 18, 24, 25, 26, 27, 28, 34]
+      right_hand: [19, 20, 21, 22, 23, 29, 30, 31, 32, 33, 35]
     state_fields:
-      arm_left: [left_eef_pos, left_eef_quat]
-      arm_right: [right_eef_pos, right_eef_quat]
-      hand_joint_state: [hand_joint_state]
+      left_arm: [left_eef_pos, left_eef_quat]
+      right_arm: [right_eef_pos, right_eef_quat]
+      # Isaac Lab reports the hand state in [right, left] joint order.
+      left_hand:
+        - field: hand_joint_state
+          slice: [11, 22]
+      right_hand:
+        - field: hand_joint_state
+          slice: [0, 11]
+    state_sin_cos_embedding_keys: [left_arm, right_arm, left_hand, right_hand]
     camera_fields:
       robot_pov_cam: robot_pov_cam
       left_wrist_cam: left_wrist_cam

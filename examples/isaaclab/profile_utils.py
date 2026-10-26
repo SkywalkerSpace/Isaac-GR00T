@@ -2,7 +2,44 @@
 
 from pathlib import Path
 
+import numpy as np
 import yaml
+
+
+def _state_source_name(source: str | dict) -> str:
+    return source if isinstance(source, str) else source["field"]
+
+
+def read_state_group(source_data, sources: list[str | dict]):
+    """Read and concatenate HDF5 or live-observation sources for one state group."""
+    values = []
+    for source in sources:
+        if isinstance(source, str):
+            value = source_data[source]
+        else:
+            value = source_data[source["field"]]
+            if "slice" in source:
+                start, end = map(int, source["slice"])
+                value = value[..., start:end]
+        values.append(value)
+    return values[0] if len(values) == 1 else np.concatenate(values, axis=-1)
+
+
+def action_groups_to_env(action_groups: dict, profile: dict):
+    """Scatter grouped policy actions back into the environment action order."""
+    first = next(iter(action_groups.values()))
+    result = np.empty((*first.shape[:-1], profile["action_dim"]), dtype=first.dtype)
+    for key, indices in profile["action_fields"].items():
+        result[..., list(indices)] = action_groups[key]
+    return result
+
+
+def action_column_names(profile: dict) -> list[str]:
+    names = [None] * profile["action_dim"]
+    for key, indices in profile["action_fields"].items():
+        for dim, index in enumerate(indices):
+            names[index] = f"{key}_{dim}"
+    return names
 
 
 def load_profiles(path: Path) -> list[dict]:
@@ -46,24 +83,38 @@ def load_profiles(path: Path) -> list[dict]:
         if int(profile["fps"]) <= 0 or int(profile["action_horizon"]) <= 0:
             raise ValueError(f"fps and action_horizon must be positive in profile {profile['name']}")
         action_fields = {}
-        ranges = []
-        for key, bounds in profile["action_fields"].items():
-            start, end = map(int, bounds)
-            if start < 0 or end <= start:
-                raise ValueError(f"Invalid action range for {key}: {bounds}")
-            action_fields[key] = (start, end)
-            ranges.append((start, end))
-        sorted_ranges = sorted(ranges)
-        cursor = 0
-        for start, end in sorted_ranges:
-            if start != cursor:
-                raise ValueError(
-                    f"Action fields in {profile['name']} must cover dimensions "
-                    "without gaps or overlap"
-                )
-            cursor = end
-        profile["action_dim"] = cursor
+        used_indices = []
+        for key, indices in profile["action_fields"].items():
+            if not isinstance(indices, list) or not indices:
+                raise ValueError(f"Action indices for {key} must be a non-empty list")
+            indices = [int(index) for index in indices]
+            if min(indices) < 0 or len(set(indices)) != len(indices):
+                raise ValueError(f"Invalid action indices for {key}: {indices}")
+            action_fields[key] = tuple(indices)
+            used_indices.extend(indices)
+        if sorted(used_indices) != list(range(len(used_indices))):
+            raise ValueError(
+                f"Action groups in {profile['name']} must cover each environment action "
+                "dimension exactly once"
+            )
+        profile["action_dim"] = len(used_indices)
         profile["action_fields"] = action_fields
+        for key, sources in profile["state_fields"].items():
+            normalized = []
+            for source in sources:
+                if isinstance(source, str):
+                    normalized.append(source)
+                elif isinstance(source, dict) and "field" in source:
+                    entry = {"field": str(source["field"])}
+                    if "slice" in source:
+                        start, end = map(int, source["slice"])
+                        if start < 0 or end <= start:
+                            raise ValueError(f"Invalid state slice for {key}: {source}")
+                        entry["slice"] = (start, end)
+                    normalized.append(entry)
+                else:
+                    raise ValueError(f"Invalid state source for {key}: {source}")
+            profile["state_fields"][key] = normalized
         state_cursor = 0
         profile["state_slices"] = {}
         for key, fields in profile["state_fields"].items():

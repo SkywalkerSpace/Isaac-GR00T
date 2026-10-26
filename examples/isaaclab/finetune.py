@@ -42,6 +42,8 @@ def main() -> None:
     if not output_dir.is_absolute():
         config_data["training"]["output_dir"] = str((config_path.parent / output_dir).resolve())
     config = get_default_config().load_dict(config_data)
+    # Isaac Lab profiles store absolute environment commands. Preserve the
+    # configured setting and keep modality action representations absolute.
     profiles = load_profiles(args.profiles)
     if not profiles:
         raise ValueError("No robot/task profiles configured")
@@ -76,7 +78,8 @@ def main() -> None:
                 dataset_type="physical_embodiment",
             )
         )
-        config.data.modality_configs[profile["embodiment_tag"]] = build_modality_config(profile)
+        modality_config = build_modality_config(profile)
+        config.data.modality_configs[profile["embodiment_tag"]] = modality_config
 
     from gr00t.configs.data.embodiment_configs import MODALITY_CONFIGS
 

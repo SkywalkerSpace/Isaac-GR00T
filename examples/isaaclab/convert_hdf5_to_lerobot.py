@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from profile_utils import load_profiles, select_profiles
+from profile_utils import _state_source_name, load_profiles, read_state_group, select_profiles
 
 
 def _write_video(frames: np.ndarray, output_path: Path, fps: int) -> None:
@@ -31,29 +31,65 @@ def _write_video(frames: np.ndarray, output_path: Path, fps: int) -> None:
 
 def _read_state(obs: h5py.Group, length: int, state_fields: dict) -> dict[str, np.ndarray]:
     state = {}
-    for key, fields in state_fields.items():
-        values = [obs[field][:] for field in fields]
-        value = values[0] if len(values) == 1 else np.concatenate(values, axis=-1)
+    for key, sources in state_fields.items():
+        value = read_state_group(obs, sources)
         if value.shape[0] < length:
             raise ValueError(f"State {key} has {value.shape[0]} steps, expected {length}")
         state[key] = np.asarray(value[:length], dtype=np.float32)
     return state
 
 
+def _aligned_episode_length(
+    demo: h5py.Group,
+    obs: h5py.Group,
+    action_source: str,
+    state_fields: dict,
+    camera_fields: dict,
+    demo_name: str,
+) -> int:
+    """Validate the recorder's pre-step action/observation alignment.
+
+    Isaac Lab records policy observations before ``env.step`` and records the
+    input action at the beginning of that same step. Those sequences therefore
+    have one-to-one alignment. ``states`` is post-step data and must not be used
+    as the observation sequence here.
+    """
+    expected = int(demo.attrs.get("num_samples", -1))
+    if expected <= 0:
+        raise ValueError(f"{demo_name} has invalid num_samples={expected}")
+
+    lengths = {f"{action_source}": len(demo[action_source])}
+    lengths.update({
+        f"obs/{_state_source_name(source)}": len(obs[_state_source_name(source)])
+        for sources in state_fields.values()
+        for source in sources
+    })
+    lengths.update({f"obs/{field}": len(obs[field]) for field in camera_fields.values()})
+
+    mismatched = {name: length for name, length in lengths.items() if length != expected}
+    if mismatched:
+        details = ", ".join(f"{name}={length}" for name, length in mismatched.items())
+        raise ValueError(
+            f"{demo_name} has num_samples={expected}, but pre-step actions and policy "
+            f"observations are not aligned ({details}). Refusing to truncate silently."
+        )
+    return expected
+
+
 def _validate_absolute_pose_actions(
     actions: np.ndarray, action_fields: dict, demo_name: str
 ) -> None:
     """Catch joint-space data accidentally configured as absolute wrist poses."""
-    for key in ("arm_left", "arm_right"):
+    for key in ("left_arm", "right_arm"):
         if key not in action_fields:
             continue
-        start, end = action_fields[key]
-        if end - start != 7:
+        indices = list(action_fields[key])
+        if len(indices) != 7:
             raise ValueError(
-                f"{demo_name} {key} action slice has {end - start} dimensions; "
+                f"{demo_name} {key} action group has {len(indices)} dimensions; "
                 "absolute wrist poses require [xyz, quaternion_xyzw] (7 dimensions)"
             )
-        quaternion_norm = np.linalg.norm(actions[:, start + 3 : end], axis=-1)
+        quaternion_norm = np.linalg.norm(actions[:, indices[3:7]], axis=-1)
         invalid = ~np.isfinite(quaternion_norm) | (np.abs(quaternion_norm - 1.0) > 0.05)
         if np.any(invalid):
             first_bad = int(np.flatnonzero(invalid)[0])
@@ -102,7 +138,14 @@ def convert(profile: dict) -> None:
                 _validate_absolute_pose_actions(actions, action_fields, demo_name)
 
                 obs = demo["obs"]
-                length = min(int(demo.attrs.get("num_samples", len(actions))), len(actions))
+                length = _aligned_episode_length(
+                    demo,
+                    obs,
+                    action_source,
+                    state_fields,
+                    camera_fields,
+                    demo_name,
+                )
                 state = _read_state(obs, length, state_fields)
                 camera_frames = {}
                 for key, hdf5_key in camera_fields.items():
@@ -116,10 +159,10 @@ def convert(profile: dict) -> None:
 
                 actions = actions[:length]
                 action = {}
-                for key, (start, end) in action_fields.items():
-                    action[key] = actions[:, start:end]
-                    if action[key].shape[1] != end - start:
-                        raise ValueError(f"Bad configured action slice for {key}: {(start, end)}")
+                for key, indices in action_fields.items():
+                    action[key] = actions[:, list(indices)]
+                    if action[key].shape[1] != len(indices):
+                        raise ValueError(f"Bad configured action indices for {key}: {indices}")
 
                 flat_state = np.concatenate(list(state.values()), axis=-1)
                 flat_action = np.concatenate(list(action.values()), axis=-1)

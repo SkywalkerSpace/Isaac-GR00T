@@ -75,7 +75,7 @@ from gr00t.model.gr00t_n1d7.processing_gr00t_n1d7 import (
 from gr00t.policy.gr00t_policy import Gr00tPolicy
 from isaaclab_tasks.utils import parse_env_cfg
 
-from profile_utils import load_profiles, select_profiles
+from profile_utils import action_column_names, action_groups_to_env, load_profiles, read_state_group, select_profiles
 
 
 def _numpy(value) -> np.ndarray:
@@ -150,9 +150,13 @@ def _env_observation_to_policy(obs: dict, instruction: str, modality: dict, prof
 
     states = {}
     for key in modality["state"].modality_keys:
-        fields = profile["state_fields"][key]
-        values = [_numpy(policy_obs[field]) for field in fields]
-        value = values[0] if len(values) == 1 else np.concatenate(values, axis=-1)
+        sources = profile["state_fields"][key]
+        source_values = {
+            source if isinstance(source, str) else source["field"]:
+            _numpy(policy_obs[source if isinstance(source, str) else source["field"]])
+            for source in sources
+        }
+        value = read_state_group(source_values, sources)
         if value.ndim > 1:
             value = value[0]
         states[key] = np.asarray(value, dtype=np.float32)[None, None, :]
@@ -216,7 +220,7 @@ def _diagnose_inputs(policy, live_input: dict, profile: dict, instruction: str) 
             prediction, _ = policy.get_action(diagnostic_input)
             print(
                 f"state={state_source:5s} img={image_source:5s} -> "
-                f"左臂z预测 {prediction['arm_left'][0, 0, 2]:.3f} (真值 1.259)"
+                f"左臂z预测 {prediction['left_arm'][0, 0, 2]:.3f} (真值 1.259)"
             )
 
 
@@ -311,10 +315,9 @@ def _diagnose_offline_demo(policy, profile: dict, instruction: str, output_dir: 
     for start in range(0, frame_count - chunk_size + 1, chunk_size):
         end = start + chunk_size
         pred, _ = policy.get_action(observation_at(start))
-        pred_flat = np.stack([
-            np.concatenate([_numpy(pred[k])[0, j].reshape(-1) for k in action_fields])
-            for j in range(min(chunk_size, len(next(iter(pred.values()))[0])))
-        ]).astype(np.float32)
+        pred_flat = action_groups_to_env(
+            {key: _numpy(value)[0, :chunk_size] for key, value in pred.items()}, profile
+        ).astype(np.float32)
         target = gt[start:end]
         if len(pred_flat) != len(target):
             raise ValueError(f"Policy returned {len(pred_flat)} actions for a {len(target)}-step chunk")
@@ -337,8 +340,12 @@ def _diagnose_offline_demo(policy, profile: dict, instruction: str, output_dir: 
         }
         pred_img, _ = policy.get_action(image_swap_input)
         pred_state, _ = policy.get_action(observation_at(start, state_index=alternate))
-        img_flat = np.concatenate([_numpy(pred_img[k])[0, 0].reshape(-1) for k in action_fields])
-        state_flat = np.concatenate([_numpy(pred_state[k])[0, 0].reshape(-1) for k in action_fields])
+        img_flat = action_groups_to_env(
+            {key: _numpy(value)[0, 0] for key, value in pred_img.items()}, profile
+        )
+        state_flat = action_groups_to_env(
+            {key: _numpy(value)[0, 0] for key, value in pred_state.items()}, profile
+        )
         real_first = pred_flat[0]
         denom = max(float(np.abs(real_first - target[0]).mean()), 1e-8)
         image_sensitivities.append(float(np.abs(real_first - img_flat).mean() / denom))
@@ -530,10 +537,9 @@ def _diagnose_training_loss_and_reconstruction(policy, profile: dict, instructio
                 "language": {policy.language_key: [[instruction]]},
             }
             sampled, _ = policy.get_action(observation)
-            sampled_flat = np.stack([
-                np.concatenate([sampled[k][0, j] for k in profile["action_fields"]])
-                for j in range(horizon)
-            ])
+            sampled_flat = action_groups_to_env(
+                {key: _numpy(value)[0, :horizon] for key, value in sampled.items()}, profile
+            )
             gt_chunk = actions_flat[start:start + horizon]
             sample_mae = float(np.mean(np.abs(sampled_flat - gt_chunk)))
             if start == 0:
@@ -836,7 +842,9 @@ def _replay_training_demo(env, policy_env, profile: dict, output_dir: Path) -> N
                 raise KeyError(f"Missing actions for /data/{name} in {dataset_path}")
             video_frames = {key: [] for key in profile["camera_fields"]}
             hand_camera = profile["camera_fields"].get("left_wrist_cam", "left_wrist_cam")
-            state_field = profile["state_fields"].get("arm_left", ["left_eef_pos"])[0]
+            left_arm_sources = profile["state_fields"].get("left_arm", ["left_eef_pos"])
+            first_source = left_arm_sources[0]
+            state_field = first_source if isinstance(first_source, str) else first_source["field"]
             if state_field not in obs_data:
                 raise KeyError(f"Missing /data/{name}/obs/{state_field}")
             if hand_camera not in obs_data:
@@ -922,7 +930,8 @@ def _mp4v_torchcodec_roundtrip(image: np.ndarray, fps: int) -> np.ndarray:
 
 
 def _action_to_env(action_dict: dict[str, np.ndarray], profile: dict, index: int) -> np.ndarray:
-    action = np.concatenate([action_dict[key][0, index] for key in profile["action_fields"]], axis=-1)
+    grouped_action = {key: value[0, index] for key, value in action_dict.items()}
+    action = action_groups_to_env(grouped_action, profile)
     if action.shape != (profile["action_dim"],):
         raise ValueError(f"Policy action has shape {action.shape}; expected ({profile['action_dim']},)")
     return action.astype(np.float32)
@@ -931,11 +940,7 @@ def _action_to_env(action_dict: dict[str, np.ndarray], profile: dict, index: int
 def _save_actions(actions: list[tuple[datetime, np.ndarray]], path: Path, profile: dict) -> None:
     """Save the actions actually sent to the environment, in profile order."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    columns = [
-        f"{key}_{dimension}"
-        for key, (start, end) in profile["action_fields"].items()
-        for dimension in range(end - start)
-    ]
+    columns = action_column_names(profile)
     with path.open("w", newline="") as action_file:
         writer = csv.writer(action_file)
         writer.writerow(["step", "timestamp", *columns])
@@ -952,11 +957,7 @@ def _save_predicted_actions(
     chunks: list[tuple[int, int, int, np.ndarray]], path: Path, profile: dict
 ) -> None:
     """Save every predicted action and whether it was sent to the environment."""
-    columns = [
-        f"{key}_{dimension}"
-        for key, (start, end) in profile["action_fields"].items()
-        for dimension in range(end - start)
-    ]
+    columns = action_column_names(profile)
     with path.open("w", newline="") as action_file:
         writer = csv.writer(action_file)
         writer.writerow(["chunk", "action_index", "executed", *columns])
